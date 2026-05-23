@@ -44,7 +44,12 @@ test('saveConfig + loadConfig: 保存后能再读出来', async () => {
   await saveConfig(cfg);
 
   const reloaded = await loadConfig();
-  assert.deepEqual(reloaded, cfg);
+  // v0.1 token 字段在 loadConfig 时被迁移为 legacy_token
+  assert.deepEqual(reloaded, {
+    interval_minutes: 90,
+    ping_prompt: 'hello',
+    accounts: [{ name: 'a', legacy_token: 'sk-ant-1', offset_minutes: 0 }],
+  });
 });
 
 test('saveConfig: 目录不存在时自动创建', async () => {
@@ -74,9 +79,10 @@ test('addAccount: 添加新帐号', async () => {
     offsetMinutes: 0,
   });
   assert.equal(next.accounts.length, 1);
+  // v0.1 token 参数被存为 legacy_token
   assert.deepEqual(next.accounts[0], {
     name: 'primary',
-    token: 'sk-ant-xxx',
+    legacy_token: 'sk-ant-xxx',
     offset_minutes: 0,
   });
   // 纯函数：原 config 不变
@@ -148,4 +154,79 @@ test('loadConfig: 损坏的 JSON 抛错', async () => {
   await fs.mkdir(getConfigDir(), { recursive: true });
   await fs.writeFile(getConfigPath(), 'not-json{');
   await assert.rejects(() => loadConfig(), /配置文件损坏/);
+});
+
+test('addAccount accepts credentials shape (v0.2)', async () => {
+  const { addAccount, loadConfig } = await freshModule();
+  let cfg = await loadConfig();
+  cfg = addAccount(cfg, {
+    name: 'primary',
+    credentials: {
+      accessToken: 'sk-ant-oat01-x',
+      refreshToken: 'sk-ant-ort01-y',
+      expiresAt: 9999999999999,
+      scopes: ['user:profile'],
+      subscriptionType: 'pro',
+    },
+    offsetMinutes: 0,
+  });
+  assert.equal(cfg.accounts[0].credentials.accessToken, 'sk-ant-oat01-x');
+  assert.equal(cfg.accounts[0].credentials.subscriptionType, 'pro');
+});
+
+test('loadConfig migrates v0.1 token field to legacy_token', async () => {
+  const { loadConfig, getConfigDir, getConfigPath } = await freshModule();
+  await fs.mkdir(getConfigDir(), { recursive: true });
+  await fs.writeFile(
+    getConfigPath(),
+    JSON.stringify({
+      interval_minutes: 100,
+      ping_prompt: 'hi',
+      accounts: [{ name: 'old', token: 'sk-ant-oat01-legacy', offset_minutes: 0 }],
+    })
+  );
+
+  const cfg = await loadConfig();
+  assert.equal(cfg.accounts[0].legacy_token, 'sk-ant-oat01-legacy');
+  assert.equal(cfg.accounts[0].credentials, undefined);
+  assert.equal(cfg.accounts[0].token, undefined);
+});
+
+test('getAccessToken returns credentials.accessToken or legacy_token', async () => {
+  const { getAccessToken } = await freshModule();
+  assert.equal(getAccessToken({ credentials: { accessToken: 'new' } }), 'new');
+  assert.equal(getAccessToken({ legacy_token: 'old' }), 'old');
+  assert.equal(getAccessToken({}), null);
+  assert.equal(getAccessToken(null), null);
+});
+
+test('setCredentials updates account credentials and clears legacy_token', async () => {
+  const { setCredentials } = await freshModule();
+  let cfg = {
+    interval_minutes: 100,
+    accounts: [{ name: 'a', legacy_token: 'old', offset_minutes: 0 }],
+  };
+  cfg = setCredentials(cfg, 'a', {
+    accessToken: 'new-at',
+    refreshToken: 'new-rt',
+    expiresAt: 999,
+    scopes: ['user:profile'],
+    subscriptionType: 'pro',
+  });
+  assert.equal(cfg.accounts[0].credentials.accessToken, 'new-at');
+  assert.equal(cfg.accounts[0].legacy_token, undefined);
+});
+
+test('setLastUsage stores usage data on account', async () => {
+  const { setLastUsage } = await freshModule();
+  let cfg = {
+    interval_minutes: 100,
+    accounts: [{ name: 'a', credentials: { accessToken: 'x' }, offset_minutes: 0 }],
+  };
+  cfg = setLastUsage(cfg, 'a', {
+    five_hour: { utilization: 0.57, resets_at: '2026-05-23T19:00:00Z' },
+    seven_day: { utilization: 0.14, resets_at: '2026-05-28T15:00:00Z' },
+    fetched_at: '2026-05-23T14:00:00Z',
+  });
+  assert.equal(cfg.accounts[0].last_usage.five_hour.utilization, 0.57);
 });
