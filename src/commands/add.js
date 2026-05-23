@@ -1,67 +1,103 @@
-// `interval-claude add <name> [--offset N]` — 添加帐号
-//
-// 行为:
-//   - name 必填位置参数
-//   - --offset <minutes>: 可选，未指定时取「已有帐号数 * interval_minutes」
-//     这样默认错峰，新帐号自动排在队尾
-//   - token 从 stdin 单行读取
+// v0.2 add — 从 macOS Keychain 捕获 OAuth credentials
+// 三种模式：
+//   1. 无参数 → 交互式批量添加
+//   2. 单个 name → 单条捕获
+//   3. --offset N → 覆盖自动计算的 offset
 
-import { loadConfig, saveConfig, addAccount, getConfigPath } from '../config.js';
-import { prompt, closePrompt } from './prompt.js';
+import { loadConfig, saveConfig, addAccount, setLastUsage } from '../config.js';
+import { readCredentials, isKeychainSupported } from '../keychain.js';
+import { queryUsage } from '../oauth.js';
+import { prompt as ask, closePrompt as close } from './prompt.js';
 
 export default async function addCommand(args) {
-  // args = ['<name>', ...options]
-  const name = args.find((a) => !a.startsWith('--'));
-  if (!name) {
-    console.error('用法: interval-claude add <name> [--offset <minutes>]');
+  if (!isKeychainSupported()) {
+    console.error('add: 暂只支持 macOS（依赖 Keychain）。Linux/Windows 请等 v0.3。');
     process.exit(1);
   }
 
+  const positional = args.filter(a => !a.startsWith('--'));
   const offsetIdx = args.indexOf('--offset');
-  let offsetMinutes;
-  if (offsetIdx !== -1) {
-    const v = args[offsetIdx + 1];
-    if (v === undefined) {
-      console.error('--offset 缺少参数值');
-      process.exit(1);
-    }
-    const parsed = Number(v);
-    if (!Number.isFinite(parsed)) {
-      console.error(`--offset 必须是数字，收到: ${v}`);
-      process.exit(1);
-    }
-    offsetMinutes = parsed;
-  }
+  const offsetMinutes = offsetIdx >= 0 ? parseInt(args[offsetIdx + 1], 10) : null;
 
+  if (positional.length === 0) {
+    return interactiveBatch();
+  }
+  const name = positional[0];
+  await captureOne(name, { offsetMinutes });
+  close();
+}
+
+async function captureOne(name, { offsetMinutes }) {
   const config = await loadConfig();
-
-  if (offsetMinutes === undefined) {
-    // 自动错峰：N 个已有帐号 → 新帐号 offset = N * interval_minutes
-    offsetMinutes = (config.accounts ?? []).length * config.interval_minutes;
-  }
-
-  let token;
-  try {
-    const raw = await prompt(`token (帐号 ${name}): `);
-    token = raw.trim();
-  } finally {
-    closePrompt();
-  }
-
-  if (!token) {
-    console.error('token 不能为空');
+  if (config.accounts.some(a => a.name === name)) {
+    console.error(`帐号 "${name}" 已存在`);
     process.exit(1);
   }
 
-  let next;
+  console.log(`请先运行: claude /logout && claude /login`);
+  console.log(`（登录目标帐号 "${name}"）`);
+  console.log(`登录完成后按回车继续...`);
+  await ask('');
+
+  let credentials;
   try {
-    next = addAccount(config, { name, token, offsetMinutes });
+    credentials = readCredentials();
   } catch (err) {
-    console.error(`添加帐号失败: ${err.message}`);
+    console.error(`读取 Keychain 失败: ${err.message}`);
     process.exit(1);
   }
-  await saveConfig(next);
+  if (!credentials) {
+    console.error('Keychain 中未找到 claude CLI 凭证。请确认已运行 claude /login。');
+    process.exit(1);
+  }
 
-  console.log(`已添加帐号 "${name}" (offset_minutes=${offsetMinutes})`);
-  console.log(`配置文件: ${getConfigPath()}`);
+  // 验证 + 拉一次 usage
+  let usage = null;
+  try {
+    usage = await queryUsage(credentials.accessToken);
+  } catch (err) {
+    console.warn(`⚠️  usage 查询失败 (${err.message})。继续保存帐号但无 usage 数据。`);
+  }
+
+  const autoOffset = offsetMinutes ?? (config.accounts.length * (config.interval_minutes || 100));
+  let newConfig = addAccount(config, { name, credentials, offsetMinutes: autoOffset });
+  if (usage) newConfig = setLastUsage(newConfig, name, usage);
+  await saveConfig(newConfig);
+
+  console.log(`✅ 已添加 ${name}`);
+  console.log(`   订阅: ${credentials.subscriptionType || '未知'}`);
+  if (usage?.five_hour) {
+    const pct = Math.round(usage.five_hour.utilization * 100);
+    console.log(`   5h 使用: ${pct}% (剩余 ${100 - pct}%)`);
+    console.log(`   重置时间: ${usage.five_hour.resets_at}`);
+  }
+  if (usage?.seven_day) {
+    const pct = Math.round(usage.seven_day.utilization * 100);
+    console.log(`   7天使用: ${pct}%`);
+  }
+}
+
+async function interactiveBatch() {
+  let count = 0;
+  while (true) {
+    const cont = await ask(`准备好登录第 ${count + 1} 个帐号? [Y/n]: `);
+    if (cont.toLowerCase() === 'n') break;
+    const name = await ask('帐号名: ');
+    if (!name.trim()) {
+      console.log('帐号名不能为空，跳过');
+      continue;
+    }
+    try {
+      await captureOne(name.trim(), { offsetMinutes: null });
+      count++;
+    } catch (err) {
+      console.error(`添加 ${name} 失败: ${err.message}`);
+    }
+  }
+  close();
+  if (count > 0) {
+    console.log(`\n✅ 共添加 ${count} 个帐号`);
+  } else {
+    console.log('没有添加任何帐号');
+  }
 }
