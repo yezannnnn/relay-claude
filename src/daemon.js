@@ -75,32 +75,6 @@ async function refreshUsageAndToken(accountName, logFn) {
 }
 
 /**
- * 拉取目标帐号的 usage，并在 token 刷新时回写 config。
- * 单独函数便于隔离错误 — 此操作失败不影响 ping 主流程。
- * v0.1 的 legacy_token 账户无法查询 usage，自动跳过。
- */
-async function refreshUsageAndToken(accountName, logFn) {
-  let config = await loadConfig();
-  const account = config.accounts.find((a) => a.name === accountName);
-  if (!account?.credentials) return; // v0.1 legacy_token，跳过
-  try {
-    const { usage, credentials } = await queryUsageWithRefresh(
-      account.credentials
-    );
-    config = setLastUsage(config, accountName, usage);
-    if (credentials.accessToken !== account.credentials.accessToken) {
-      config = setCredentials(config, accountName, credentials);
-      logFn(`token refreshed for ${accountName}`);
-    }
-    await saveConfig(config);
-  } catch (err) {
-    logFn(
-      `usage refresh failed for ${accountName}: ${err?.message ?? err}`
-    );
-  }
-}
-
-/**
  * 守护进程主循环。
  *
  * @param {Object} options
