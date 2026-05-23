@@ -21,7 +21,7 @@ import watchCommand from './commands/watch.js';
 import removeCommand from './commands/remove.js';
 import tuiCommand from './commands/tui.js';
 
-const VERSION = '0.1.0';
+const VERSION = '0.2.0';
 
 /**
  * 主入口。args = process.argv.slice(2)
@@ -80,22 +80,27 @@ function printHelp() {
 用法:
   interval-claude <command> [options]
 
-命令:
-  init                          交互式向导，添加第一个帐号
-  add <name> [--offset N]       添加帐号 (token 从 stdin 读取)
-  list                          列出所有帐号 + 状态
+帐号管理:
+  add [name] [--offset N]       从 macOS Keychain 捕获 OAuth 凭证
+                                  无参数 → 交互式批量
+                                  需先 claude /login 登录目标帐号
+  list [--refresh]              列出帐号 + 订阅类型 + usage
   remove <name> [--yes]         删除帐号
-  start                         启动守护进程
-  stop                          停止守护进程
-  status                        查看守护进程状态
+  use <name>                    全局切换 Keychain（所有终端立即生效）
   export-env [name] [--shell S] 输出 shell export 命令（仅当前 shell）
                                   S = bash | cmd | pwsh
-                                  典型: eval "$(interval-claude export-env)"
                                   别名: switch（v0.1 兼容）
-  use <name>                    全局切换 Keychain (所有终端立即生效)
-  ping <name>                   手动 ping 某帐号（测试用）
-  watch                         实时仪表盘 (Ctrl+C 退出)
+
+守护进程:
+  start                         启动（交互式询问错峰激活）
+  stop                          停止
+  status                        查看状态
+  ping <name>                   手动触发 ping
   tui                           实时多帐号仪表盘（按 q 退出）
+  watch                         简化版仪表盘（v0.1 兼容）
+
+其他:
+  init                          交互式向导（旧版兼容，建议直接 add）
   --help, -h                    显示此帮助
   --version, -v                 显示版本
 

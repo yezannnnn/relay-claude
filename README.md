@@ -4,6 +4,8 @@
 
 每个 Claude 帐号有 5 小时滚动重置窗口。如果你有 3 个帐号，按 100 分钟错峰激活，可以让三个 5h 窗口拼接覆盖 8-9 小时工作日。
 
+> v0.2 新增：从 macOS Keychain 捕获 OAuth credentials，实时查询 usage / 重置时间 / 订阅类型，自动 token 续期，全局帐号切换（`use` 命令），实时多帐号 TUI 仪表盘。
+
 ## 工作原理
 
 ```
@@ -14,7 +16,8 @@
               你正常工作    A 用完切 B    B 用完切 C
 ```
 
-守护进程定时给每个帐号发一条 `claude -p "hi"`，让它各自的 5h 窗口开始计时。你只需要在主帐号额度用完时运行 `interval-claude switch`，瞬间切换到剩余时间最多的帐号。
+守护进程定时为每个帐号发一条 `claude -p "hi"`，让各自的 5h 窗口开始计时。
+你主帐号额度用完时跑 `interval-claude use <name>` 瞬间切换到剩余时间最多的帐号。
 
 ## 安装
 
@@ -24,148 +27,225 @@ cd intervalClaude
 npm link            # 注册全局命令 interval-claude
 ```
 
-要求 Node.js 18+。零运行时依赖。
+要求：
+- Node.js 18+
+- macOS（v0.2 仅支持，依赖 Keychain）
+- 零运行时依赖
 
-## 准备工作
+## 快速开始
 
-为每个 Claude 帐号生成长效 token：
+### 1. 添加第一个帐号
 
 ```bash
 # 登录帐号 A
 claude /login
-claude setup-token   # 输出一个 sk-ant-xxx token，复制保存
 
-# 切换到帐号 B 重复
-claude /logout
-claude /login
-claude setup-token
+# 让 intervalClaude 捕获凭证
+interval-claude add primary
+# 提示"请先运行 claude /login..."，按回车继续
+# 自动读 Keychain，验证 + 显示订阅类型 + 5h 使用率
 ```
 
-## 快速开始
+### 2. 添加更多帐号
 
 ```bash
-# 1. 初始化（添加第一个帐号）
-interval-claude init
+# 登出 A，登录 B
+claude /logout
+claude /login
 
-# 2. 添加更多帐号（offset 自动按 100min 递增）
 interval-claude add secondary
-interval-claude add tertiary
 
-# 3. 查看帐号列表
-interval-claude list
+# 重复添加 tertiary…
+```
 
-# 4. 启动守护进程（后台运行）
+或者**交互式批量**：
+
+```bash
+interval-claude add
+# 提示"准备好登录第 1 个？" → Y → 输入名字 → 自动读取
+# 然后提示第 2 个…
+```
+
+### 3. 查看所有帐号
+
+```bash
+interval-claude list           # 用缓存的 usage（快）
+interval-claude list --refresh # 实时查询 API
+```
+
+输出示例：
+```
+NAME       SUB   5H USE  RESETS    7D USE  STATUS
+─────────  ────  ──────  ────────  ──────  ──────
+* primary  Pro    57%    in 4h32m   14%    🟢
+  secondary Pro    0%     -          0%    ⚪
+  tertiary Max5x  23%    in 2h11m    5%    🟢
+
+interval_minutes=100  共 3 个帐号
+```
+
+`*` 表示当前 Keychain 活跃的帐号。
+
+### 4. 启动守护进程
+
+```bash
 interval-claude start
+# 检测到 3 个帐号: primary, secondary, tertiary
+# 是否开启错峰激活? [Y/n]: Y
+# ✅ 错峰安排（5h ÷ 3 = 100 分钟间隔）:
+#    primary  → 立即 ping
+#    secondary → 100 分钟后 ping
+#    tertiary → 200 分钟后 ping
+# ✅ 守护进程已启动 (pid=12345)
+```
 
-# 5. 主帐号用完时，切到剩余时间最多的帐号
-eval "$(interval-claude switch)"
-claude   # 这下走新帐号
+守护进程会：
+- 按错峰安排自动 ping 每个帐号触发 5h 窗口
+- 每次 ping 后查询并缓存 usage
+- 自动续期临期 token
 
-# 6. 实时仪表盘（可选）
-interval-claude watch
+### 5. 切换帐号
 
-# 7. 停止守护进程
+主帐号额度用完时：
+
+```bash
+interval-claude use secondary
+# 备份当前 Keychain 到帐号: primary
+# ✅ 已切换到 secondary
+#    订阅: Pro
+#    5h 使用: 12% (剩余 88%)
+# 所有终端的 claude 命令立即生效
+```
+
+或自动选剩余时间最多的：
+
+```bash
+eval "$(interval-claude export-env)"  # 仅当前 shell
+```
+
+### 6. 实时仪表盘
+
+```bash
+interval-claude tui
+```
+
+```
+┌─ intervalClaude · 守护进程运行中 (uptime 1h 23m) ─────┐
+│                                                       │
+│  NAME         SUB      5H USE         7D USE  NEXT    │
+│  ────────     ────     ───────────    ──────  ──────  │
+│  * primary    Pro      ███▌░ 57%      14%     已过    │
+│    secondary  Pro      ░░░░░ 0%       0%      1h23m   │
+│    tertiary   Max5x    █▌░░░ 23%      5%      3h10m   │
+│                                                       │
+│  当前 Keychain: primary                               │
+│                                                       │
+│  [r] 刷新  [u] 切换  [p] ping  [q] 退出              │
+└───────────────────────────────────────────────────────┘
+```
+
+按键：
+- `r` — 强制 API 刷新所有帐号 usage
+- `u` — 切换帐号（弹出选择菜单）
+- `p` — 手动 ping
+- `s` — 启动 daemon（如未运行）
+- `q` — 退出
+
+### 7. 停止守护进程
+
+```bash
 interval-claude stop
 ```
 
 ## 命令清单
 
+### 帐号管理
+
 | 命令 | 说明 |
 |------|------|
-| `init` | 交互式向导，添加第一个帐号 |
-| `add <name>` | 添加帐号，可选 `--offset N`（默认自动排队） |
-| `list` | 列出所有帐号 + ping 状态 + 估算剩余时间 |
-| `start` | 启动守护进程（后台运行） |
-| `stop` | 停止守护进程 |
-| `status` | 查看守护进程状态 |
-| `switch [name]` | 输出 shell 命令切换 token。不带 name 自动选剩余最多的 |
-| `ping <name>` | 手动触发某帐号 ping（测试用） |
-| `watch` | 实时 ASCII 仪表盘 |
+| `add [name] [--offset N]` | 从 Keychain 捕获凭证；无参数 = 批量 |
+| `list [--refresh]` | 列出帐号 + 订阅 + usage |
+| `remove <name> [--yes]` | 删除帐号 |
+| `use <name>` | 全局切换 Keychain（所有终端立即生效） |
+| `export-env [name]` | 输出 shell export 命令（仅当前 shell） |
 
-### switch 的 shell 适配
+### 守护进程
 
-```bash
-# Bash / Zsh (默认)
-eval "$(interval-claude switch)"
-
-# PowerShell
-interval-claude switch --shell pwsh | Invoke-Expression
-
-# CMD
-interval-claude switch --shell cmd > %TEMP%\set.bat && %TEMP%\set.bat
-```
+| 命令 | 说明 |
+|------|------|
+| `start` | 启动（交互式询问错峰） |
+| `stop` | 停止 |
+| `status` | 查看状态 |
+| `ping <name>` | 手动触发 ping |
+| `tui` | 实时多帐号仪表盘 |
 
 ## 配置文件
 
-存储位置：
-- Mac/Linux: `~/.intervalClaude/`
-- Windows: `%USERPROFILE%\.intervalClaude\`
+存储位置：`~/.intervalClaude/`（可通过 `INTERVAL_CLAUDE_HOME` 覆盖）
 
-可通过环境变量 `INTERVAL_CLAUDE_HOME` 覆盖（用于测试）。
-
-`config.json`:
+`config.json` (v0.2 格式)：
 ```json
 {
   "interval_minutes": 100,
   "ping_prompt": "hi",
   "accounts": [
-    {"name": "primary",   "token": "sk-ant-xxx", "offset_minutes": 0},
-    {"name": "secondary", "token": "sk-ant-xxx", "offset_minutes": 100},
-    {"name": "tertiary",  "token": "sk-ant-xxx", "offset_minutes": 200}
+    {
+      "name": "primary",
+      "offset_minutes": 0,
+      "credentials": {
+        "accessToken": "sk-ant-oat01-...",
+        "refreshToken": "sk-ant-ort01-...",
+        "expiresAt": 1779573809608,
+        "scopes": ["user:profile", "user:inference", ...],
+        "subscriptionType": "pro"
+      },
+      "last_usage": {
+        "five_hour": {"utilization": 0.57, "resets_at": "2026-05-23T19:00:00Z"},
+        "seven_day": {"utilization": 0.14, "resets_at": "2026-05-28T15:00:00Z"}
+      }
+    }
   ]
 }
 ```
 
 文件权限 0o600（仅本人可读写）。**不要提交到 git**。
 
-## 守护进程行为
+## v0.1 → v0.2 升级
 
-- 每 60 秒扫描一次配置和状态
-- 按 `started_at + offset_minutes` 计算每个帐号的首次 ping 时间
-- 已 ping 过的帐号按 `interval_minutes × 帐号数` 周期续 ping
-- ping 失败自动重试 3 次（指数退避 1s/2s/4s）
-- 单帐号失败不影响其他帐号
-- 配置/状态文件每轮重读，支持运行时修改
+v0.1 用 `claude setup-token` 生成的长效 token 没有 `user:profile` scope，无法查 usage。
 
-日志写入 `~/.intervalClaude/daemon.log`。
+升级方式：
+1. 安装 v0.2
+2. 跑 `interval-claude list` — 旧帐号会显示 SUB="v0.1"
+3. 对每个帐号：
+   ```bash
+   claude /logout
+   claude /login        # 登录该帐号
+   interval-claude remove <name> --yes
+   interval-claude add <name>
+   ```
 
 ## 跨平台
 
-| 项 | Mac/Linux | Windows |
-|---|---|---|
-| 配置路径 | `~/.intervalClaude/` | `%USERPROFILE%\.intervalClaude\` |
-| 后台进程 | `spawn detached` + unref | 同样 |
-| 信号 | SIGTERM | Node 模拟 SIGTERM |
-| Switch 输出 | `export VAR=xxx` | `set VAR=xxx` 或 PowerShell `$env:VAR='xxx'` |
+| 平台 | 状态 |
+|------|------|
+| macOS | ✅ v0.2 完整支持（Keychain） |
+| Linux | ⏳ v0.3 计划（读 `~/.config/claude/credentials.json`） |
+| Windows | ⏳ v0.3 计划（Credential Manager） |
 
-## 开发
+## 技术细节
 
-```bash
-npm test           # 跑所有单元测试（54+ 个）
-node bin/interval-claude --help
-```
-
-测试用临时目录隔离（`INTERVAL_CLAUDE_HOME=/tmp/test-idc`），不污染真实配置。
+- **零运行时依赖**：只用 Node.js 标准库 + `curl` 命令
+- **Usage API**：`https://api.anthropic.com/api/oauth/usage` (非官方但稳定)
+- **Token refresh**：`POST /api/oauth/token` (client_id 与 claude CLI 一致)
+- **代理支持**：通过 `curl` 自动读 `https_proxy` 环境变量
+- **错峰算法**：`offset_minutes = i * (300 / N)` 自动按帐号数分配
 
 ## 安全提醒
 
-- `config.json` 含明文 token，**永远不要提交到公开仓库**
-- Token 一旦泄露可用任何 Claude API 调用计入你的额度
-- 如果 token 泄露，去 https://claude.ai/settings/keys 撤销
-
-## 常见问题
-
-**Q: 守护进程跑着，电脑睡眠唤醒后还能工作吗？**
-A: 唤醒后下次 60s 扫描会立即补上逾期未 ping 的帐号。
-
-**Q: 怎么知道某帐号 5h 窗口什么时候到期？**
-A: `interval-claude list` 显示 REMAIN(m) 列；或 `interval-claude watch` 实时看。
-
-**Q: 主帐号还有额度但我想提前切？**
-A: `interval-claude switch <name>` 显式指定。
-
-**Q: ping 用的是什么模型？**
-A: 默认 prompt "hi"，触发当前帐号的 5h 窗口开始计时。可改 config.json 的 `ping_prompt`。
+- `config.json` 含明文 token，**绝不要提交到公开仓库**
+- Token 泄露时立即去 https://claude.ai/settings/keys 撤销
+- 调用 Anthropic 非官方 API（`/api/oauth/usage`）有改动风险，但同样的 endpoint 被 cc-switch、claude CLI 自身使用，相对稳定
 
 ## License
 
