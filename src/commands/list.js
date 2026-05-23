@@ -1,98 +1,119 @@
-// `interval-claude list` — 列出所有帐号与状态
-//
-// 输出列: name | last_ping | remaining (min) | status
-//
-// status 取值:
-//   - never    : 从未 ping 过
-//   - active   : 剩余 >= 60 min
-//   - expiring : 剩余 < 60 min
-//   - expired  : 剩余 = 0
+// src/commands/list.js
+// v0.2 list — 显示订阅类型 + 5h/7d 使用率 + 重置时间
+// --refresh 强制实时查询 API
+// 当前 Keychain 活跃的帐号前缀 `*`
 
-import { loadConfig, getConfigPath } from '../config.js';
-import { loadState } from '../state.js';
-import { estimatedRemainingMinutes } from '../scheduler.js';
+import { loadConfig, saveConfig, getAccessToken, setLastUsage, setCredentials } from '../config.js';
+import { isKeychainSupported, readKeychainRaw, parseClaudeCredentials } from '../keychain.js';
+import { queryUsageWithRefresh } from '../oauth.js';
 
-function formatTime(iso) {
-  if (!iso) return '-';
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return '-';
-  const pad = (n) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-}
+export default async function listCommand(args) {
+  const refresh = args.includes('--refresh') || args.includes('-r');
+  let config = await loadConfig();
 
-function statusOf(remaining) {
-  if (remaining === null) return 'never';
-  if (remaining === 0) return 'expired';
-  if (remaining < 60) return 'expiring';
-  return 'active';
-}
-
-function padCell(s, width) {
-  s = String(s);
-  if (s.length >= width) return s;
-  return s + ' '.repeat(width - s.length);
-}
-
-export default async function listCommand() {
-  const config = await loadConfig();
-  const accounts = config.accounts ?? [];
-
-  if (accounts.length === 0) {
-    console.log('未配置任何帐号。运行 `interval-claude init` 开始配置。');
-    console.log(`配置文件位置: ${getConfigPath()}`);
+  if (config.accounts.length === 0) {
+    console.log('未配置任何帐号。运行 `interval-claude add <name>` 开始。');
     return;
   }
 
-  const state = await loadState();
-  const now = new Date();
-
-  const rows = accounts.map((a) => {
-    const lastIso = state.last_pings?.[a.name] ?? null;
-    const remaining = estimatedRemainingMinutes(a, state, now);
-    return {
-      name: a.name,
-      offset: a.offset_minutes ?? 0,
-      lastPing: formatTime(lastIso),
-      remaining: remaining === null ? '-' : String(remaining),
-      status: statusOf(remaining),
-    };
-  });
-
-  // 计算列宽
-  const widths = {
-    name: Math.max(4, ...rows.map((r) => r.name.length)),
-    offset: Math.max(6, ...rows.map((r) => String(r.offset).length)),
-    lastPing: Math.max(19, ...rows.map((r) => r.lastPing.length)),
-    remaining: Math.max(9, ...rows.map((r) => r.remaining.length)),
-    status: Math.max(8, ...rows.map((r) => r.status.length)),
-  };
-
-  const header =
-    padCell('NAME', widths.name) +
-    '  ' +
-    padCell('OFFSET', widths.offset) +
-    '  ' +
-    padCell('LAST PING', widths.lastPing) +
-    '  ' +
-    padCell('REMAIN(m)', widths.remaining) +
-    '  ' +
-    padCell('STATUS', widths.status);
-  const separator = '-'.repeat(header.length);
-  console.log(header);
-  console.log(separator);
-  for (const r of rows) {
-    console.log(
-      padCell(r.name, widths.name) +
-        '  ' +
-        padCell(r.offset, widths.offset) +
-        '  ' +
-        padCell(r.lastPing, widths.lastPing) +
-        '  ' +
-        padCell(r.remaining, widths.remaining) +
-        '  ' +
-        padCell(r.status, widths.status)
-    );
+  if (refresh) {
+    console.log('正在刷新所有帐号 usage...');
+    for (const account of config.accounts) {
+      if (!account.credentials) {
+        console.log(`  ${account.name}: 跳过（v0.1 token 不支持 usage 查询）`);
+        continue;
+      }
+      try {
+        const { usage, credentials } = await queryUsageWithRefresh(account.credentials);
+        if (credentials.accessToken !== account.credentials.accessToken) {
+          config = setCredentials(config, account.name, credentials);
+        }
+        config = setLastUsage(config, account.name, usage);
+      } catch (err) {
+        console.warn(`  ${account.name}: ${err.message}`);
+      }
+    }
+    await saveConfig(config);
+    // 重新加载以拿最新数据
+    config = await loadConfig();
   }
-  console.log('');
-  console.log(`interval_minutes=${config.interval_minutes}  共 ${accounts.length} 个帐号`);
+
+  // 识别当前 Keychain 活跃帐号
+  let activeAccessToken = null;
+  if (isKeychainSupported()) {
+    try {
+      const raw = readKeychainRaw();
+      if (raw) activeAccessToken = parseClaudeCredentials(raw).accessToken;
+    } catch { /* ignore */ }
+  }
+
+  console.log();
+  console.log(formatTable(config, activeAccessToken));
+  console.log();
+  console.log(`interval_minutes=${config.interval_minutes}  共 ${config.accounts.length} 个帐号`);
+  if (!refresh) console.log('提示: 使用 --refresh 重新查询所有帐号的 usage');
+}
+
+function formatTable(config, activeAccessToken) {
+  const headers = ['NAME', 'SUB', '5H USE', 'RESETS', '7D USE', 'STATUS'];
+  const rows = [];
+  for (const a of config.accounts) {
+    const isActive = activeAccessToken && getAccessToken(a) === activeAccessToken;
+    const name = (isActive ? '* ' : '  ') + a.name;
+    const sub = a.credentials?.subscriptionType ?? (a.legacy_token ? 'v0.1' : '-');
+    const fiveH = formatUtil(a.last_usage?.five_hour);
+    const resets = formatTimeUntil(a.last_usage?.five_hour?.resets_at);
+    const sevenD = formatUtil(a.last_usage?.seven_day);
+    const status = formatStatus(a.last_usage?.five_hour);
+    rows.push([name, sub, fiveH, resets, sevenD, status]);
+  }
+
+  const widths = headers.map((h, i) => Math.max(
+    visibleWidth(h),
+    ...rows.map(r => visibleWidth(r[i]))
+  ));
+
+  const lines = [];
+  lines.push(headers.map((h, i) => pad(h, widths[i])).join('  '));
+  lines.push(widths.map(w => '─'.repeat(w)).join('  '));
+  for (const row of rows) {
+    lines.push(row.map((c, i) => pad(c, widths[i])).join('  '));
+  }
+  return lines.join('\n');
+}
+
+function formatUtil(u) {
+  if (!u || u.utilization == null) return '-';
+  return Math.round(u.utilization * 100) + '%';
+}
+
+function formatTimeUntil(iso) {
+  if (!iso) return '-';
+  const ms = new Date(iso).getTime() - Date.now();
+  if (ms <= 0) return 'now';
+  const h = Math.floor(ms / 3600000);
+  const m = Math.floor((ms % 3600000) / 60000);
+  return h > 0 ? `in ${h}h${m}m` : `in ${m}m`;
+}
+
+function formatStatus(fiveH) {
+  if (!fiveH || fiveH.utilization == null) return '⚪';
+  const u = fiveH.utilization;
+  if (u >= 0.95) return '🔴';
+  if (u >= 0.80) return '🟡';
+  return '🟢';
+}
+
+function visibleWidth(s) {
+  let w = 0;
+  for (const ch of s) {
+    const cp = ch.codePointAt(0);
+    // emoji 和中文计 2 字符宽度
+    w += cp > 0x2e00 ? 2 : 1;
+  }
+  return w;
+}
+
+function pad(s, w) {
+  return s + ' '.repeat(Math.max(0, w - visibleWidth(s)));
 }
