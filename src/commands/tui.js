@@ -15,7 +15,7 @@ import { daemonStatus } from '../daemon.js';
 import { isKeychainSupported, readKeychainRaw, parseClaudeCredentials } from '../keychain.js';
 import { queryUsageWithRefresh } from '../oauth.js';
 import useCommand from './use.js';
-import pingCommand from './ping-cmd.js';
+import { runPing } from './ping-cmd.js';
 
 const REFRESH_INTERVAL_MS = 10000;
 
@@ -131,10 +131,26 @@ export default async function tuiCommand() {
     status = `正在 ping ${target.name}...`;
     render();
     try {
-      await pingCommand([target.name]);
-      status = `ping ${target.name} 完成`;
+      const result = await runPing(target.name);
+      if (result.error) {
+        status = `❌ ping ${target.name}: ${result.error}`;
+      } else if (result.success) {
+        status = `✅ ping ${target.name} OK (${result.elapsed}ms)`;
+      } else {
+        // ping 失败但不杀 TUI，只显示原因
+        let reason = `code=${result.code}`;
+        if (result.timedOut) reason = 'timeout';
+        else if (result.stderr) {
+          const head = result.stderr.trim().split('\n')[0].slice(0, 80);
+          reason = head || reason;
+        } else if (result.stdout) {
+          const head = result.stdout.trim().split('\n')[0].slice(0, 80);
+          reason = head || reason;
+        }
+        status = `❌ ping ${target.name} 失败 (${result.elapsed}ms): ${reason}`;
+      }
     } catch (err) {
-      status = `ping 失败: ${err?.message ?? err}`;
+      status = `❌ ping 异常: ${err?.message ?? err}`;
     }
     busy = false;
     await refreshLocal();
