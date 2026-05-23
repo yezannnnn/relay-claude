@@ -15,6 +15,7 @@ import {
   statusCommand,
 } from './commands/daemon-cmd.js';
 import switchCommand from './commands/switch.js';
+import useCommand from './commands/use.js';
 import pingCommand from './commands/ping-cmd.js';
 import watchCommand from './commands/watch.js';
 
@@ -52,6 +53,8 @@ export async function main(args) {
       return statusCommand(rest);
     case 'switch':
       return switchCommand(rest);
+    case 'use':
+      return useCommand(rest);
     case 'ping':
       return pingCommand(rest);
     case 'watch':
@@ -80,6 +83,7 @@ function printHelp() {
                                   S = bash | cmd | pwsh (默认按平台)
                                   不带 name → 自动选剩余时间最多的帐号
                                   典型用法: eval "$(interval-claude switch)"
+  use <name>                    全局切换 Keychain (所有终端立即生效)
   ping <name>                   手动 ping 某帐号（测试用）
   watch                         实时仪表盘 (Ctrl+C 退出)
   --help, -h                    显示此帮助
