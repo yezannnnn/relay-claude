@@ -18,6 +18,7 @@ import switchCommand from './commands/switch.js';
 import useCommand from './commands/use.js';
 import pingCommand from './commands/ping-cmd.js';
 import watchCommand from './commands/watch.js';
+import removeCommand from './commands/remove.js';
 
 const VERSION = '0.1.0';
 
@@ -45,6 +46,9 @@ export async function main(args) {
     case 'list':
     case 'ls':
       return listCommand(rest);
+    case 'remove':
+    case 'rm':
+      return removeCommand(rest);
     case 'start':
       return startCommand(rest);
     case 'stop':
@@ -76,6 +80,7 @@ function printHelp() {
   init                          交互式向导，添加第一个帐号
   add <name> [--offset N]       添加帐号 (token 从 stdin 读取)
   list                          列出所有帐号 + 状态
+  remove <name> [--yes]         删除帐号
   start                         启动守护进程
   stop                          停止守护进程
   status                        查看守护进程状态
