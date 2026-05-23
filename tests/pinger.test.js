@@ -97,7 +97,7 @@ function makeFakeSleep() {
 
 const FAKE_ACCOUNT = Object.freeze({
   name: 'acct-a',
-  token: 'sk-test-token-aaa',
+  legacy_token: 'sk-test-token-aaa',
   offset_minutes: 0,
 });
 
@@ -149,7 +149,7 @@ test('pingAccount: CLAUDE_CODE_OAUTH_TOKEN 通过 env 传给子进程', async ()
 
   assert.equal(calls.length, 1);
   const env = calls[0].options.env;
-  assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, FAKE_ACCOUNT.token);
+  assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, FAKE_ACCOUNT.legacy_token);
   // 同时应包含原有 env 的内容（合并而非替换）
   assert.equal(env.PATH, process.env.PATH);
 });
@@ -202,7 +202,7 @@ test('pingAccount: spawn 调用使用的命令和参数正确', async () => {
 test('pingAccount: 缺失 token 抛错', async () => {
   await assert.rejects(
     () => pingAccount({ name: 'x' }, 'hi', { spawnFn: () => {} }),
-    /token 必须为非空字符串/,
+    /no token available/i,
   );
 });
 
@@ -279,9 +279,9 @@ test('pingAll: 顺序执行，spawn 调用顺序与 accounts 顺序一致', asyn
   const { spawnFn, calls } = makeMockSpawn({ exitCode: 0 });
 
   const accounts = [
-    { name: 'a', token: 'tk-a' },
-    { name: 'b', token: 'tk-b' },
-    { name: 'c', token: 'tk-c' },
+    { name: 'a', legacy_token: 'tk-a' },
+    { name: 'b', legacy_token: 'tk-b' },
+    { name: 'c', legacy_token: 'tk-c' },
   ];
 
   const results = await pingAll(accounts, 'hi', { spawnFn });
@@ -316,9 +316,9 @@ test('pingAll: 单个帐号失败不中断后续 ping', async () => {
   };
 
   const accounts = [
-    { name: 'a', token: 'tk-a' },
-    { name: 'b', token: 'tk-b' },
-    { name: 'c', token: 'tk-c' },
+    { name: 'a', legacy_token: 'tk-a' },
+    { name: 'b', legacy_token: 'tk-b' },
+    { name: 'c', legacy_token: 'tk-c' },
   ];
 
   const results = await pingAll(accounts, 'hi', { spawnFn });
@@ -348,8 +348,8 @@ test('pingAll: withRetry=true 时单帐号走重试逻辑', async () => {
   const { sleepFn } = makeFakeSleep();
 
   const accounts = [
-    { name: 'a', token: 'tk-a' },
-    { name: 'b', token: 'tk-b' },
+    { name: 'a', legacy_token: 'tk-a' },
+    { name: 'b', legacy_token: 'tk-b' },
   ];
 
   const results = await pingAll(accounts, 'hi', {
@@ -371,5 +371,52 @@ test('pingAll: accounts 非数组抛错', async () => {
   await assert.rejects(
     () => pingAll('not-an-array', 'hi', { spawnFn: () => {} }),
     /accounts 必须为数组/,
+  );
+});
+
+// ---------- getAccessToken 集成测试 ----------
+
+test('pingAccount uses credentials.accessToken when present', async () => {
+  let capturedEnv;
+  const mockSpawn = (cmd, args, options) => {
+    capturedEnv = options.env;
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.kill = () => {};
+    setTimeout(() => child.emit('exit', 0, null), 10);
+    return child;
+  };
+  await pingAccount(
+    { name: 'a', credentials: { accessToken: 'new-token' } },
+    'hi',
+    { spawnFn: mockSpawn },
+  );
+  assert.equal(capturedEnv.CLAUDE_CODE_OAUTH_TOKEN, 'new-token');
+});
+
+test('pingAccount falls back to legacy_token for v0.1 accounts', async () => {
+  let capturedEnv;
+  const mockSpawn = (cmd, args, options) => {
+    capturedEnv = options.env;
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.kill = () => {};
+    setTimeout(() => child.emit('exit', 0, null), 10);
+    return child;
+  };
+  await pingAccount(
+    { name: 'a', legacy_token: 'old-token' },
+    'hi',
+    { spawnFn: mockSpawn },
+  );
+  assert.equal(capturedEnv.CLAUDE_CODE_OAUTH_TOKEN, 'old-token');
+});
+
+test('pingAccount throws when no token available', async () => {
+  await assert.rejects(
+    pingAccount({ name: 'a' }, 'hi', { spawnFn: () => ({}) }),
+    /no token|missing token|token/i,
   );
 });

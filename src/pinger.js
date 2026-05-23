@@ -7,6 +7,7 @@
 //   - 批量 ping 走顺序模式，因为 claude CLI 内部可能有共享状态/认证缓存
 
 import { spawn as defaultSpawn } from 'node:child_process';
+import { getAccessToken } from './config.js';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_CLAUDE_BIN = 'claude';
@@ -44,8 +45,12 @@ export async function pingAccount(account, prompt, options = {}) {
   if (!account || typeof account !== 'object') {
     throw new Error('pingAccount: account 必须为对象');
   }
-  if (!account.token || typeof account.token !== 'string') {
-    throw new Error('pingAccount: account.token 必须为非空字符串');
+
+  const token = getAccessToken(account);
+  if (!token) {
+    throw new Error(
+      `account "${account.name}" has no token available (missing credentials.accessToken or legacy_token)`,
+    );
   }
 
   const effectivePrompt =
@@ -57,7 +62,7 @@ export async function pingAccount(account, prompt, options = {}) {
   // 关键：用对象展开构造新 env，不修改全局 process.env
   const childEnv = {
     ...process.env,
-    CLAUDE_CODE_OAUTH_TOKEN: account.token,
+    CLAUDE_CODE_OAUTH_TOKEN: token,
   };
 
   const args = ['-p', effectivePrompt];
