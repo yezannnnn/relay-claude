@@ -10,7 +10,7 @@
 //   - 提示/帐号名等信息一律走 stderr，不污染 eval
 //   - 默认 shell：Windows 用 cmd，否则 bash
 
-import { loadConfig, findAccount } from '../config.js';
+import { loadConfig, findAccount, getAccessToken } from '../config.js';
 import { loadState } from '../state.js';
 import { recommendedAccount } from '../scheduler.js';
 
@@ -85,9 +85,15 @@ export default async function switchCommand(args) {
     }
   }
 
+  const token = getAccessToken(account);
+  if (!token) {
+    console.error(`帐号 "${account.name}" 没有可用 token`);
+    process.exit(1);
+  }
+
   let line;
   try {
-    line = formatExport(shell, account.token);
+    line = formatExport(shell, token);
   } catch (err) {
     console.error(err.message);
     process.exit(1);

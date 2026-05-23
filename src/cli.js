@@ -56,7 +56,8 @@ export async function main(args) {
       return stopCommand(rest);
     case 'status':
       return statusCommand(rest);
-    case 'switch':
+    case 'switch':       // v0.1 别名
+    case 'export-env':
       return switchCommand(rest);
     case 'use':
       return useCommand(rest);
@@ -87,10 +88,10 @@ function printHelp() {
   start                         启动守护进程
   stop                          停止守护进程
   status                        查看守护进程状态
-  switch [name] [--shell S]     输出 shell 命令切换 token
-                                  S = bash | cmd | pwsh (默认按平台)
-                                  不带 name → 自动选剩余时间最多的帐号
-                                  典型用法: eval "$(interval-claude switch)"
+  export-env [name] [--shell S] 输出 shell export 命令（仅当前 shell）
+                                  S = bash | cmd | pwsh
+                                  典型: eval "$(interval-claude export-env)"
+                                  别名: switch（v0.1 兼容）
   use <name>                    全局切换 Keychain (所有终端立即生效)
   ping <name>                   手动 ping 某帐号（测试用）
   watch                         实时仪表盘 (Ctrl+C 退出)
