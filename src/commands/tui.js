@@ -11,7 +11,7 @@ import { queryUsageWithRefresh } from '../oauth.js';
 import useCommand from './use.js';
 import pingCommand from './ping-cmd.js';
 
-const REFRESH_INTERVAL_MS = 5000;
+const REFRESH_INTERVAL_MS = 10000;
 
 export default async function tuiCommand() {
   process.stdout.write('\x1b[?25l'); // 隐藏光标
@@ -187,8 +187,15 @@ async function render() {
   lines.push('│  ' + keys + padRight('', W - 2 - visibleWidth(keys)) + '│');
   lines.push('└' + '─'.repeat(W) + '┘');
 
-  process.stdout.write('\x1b[2J\x1b[H');
-  process.stdout.write(lines.join('\n') + '\n');
+  // 光标回顶部 + 每行末尾 \x1b[K 清到行尾，避免整屏闪烁
+  // 第一次渲染清屏（确保下方残留被清掉），之后只回顶覆盖
+  if (!render._firstDone) {
+    process.stdout.write('\x1b[2J\x1b[H');
+    render._firstDone = true;
+  } else {
+    process.stdout.write('\x1b[H');
+  }
+  process.stdout.write(lines.map((l) => l + '\x1b[K').join('\n') + '\x1b[J\n');
 }
 
 function border(L, W, R) {
