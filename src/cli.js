@@ -19,6 +19,7 @@ import useCommand from './commands/use.js';
 import pingCommand from './commands/ping-cmd.js';
 import watchCommand from './commands/watch.js';
 import removeCommand from './commands/remove.js';
+import tuiCommand from './commands/tui.js';
 
 const VERSION = '0.1.0';
 
@@ -63,6 +64,8 @@ export async function main(args) {
       return pingCommand(rest);
     case 'watch':
       return watchCommand(rest);
+    case 'tui':
+      return tuiCommand(rest);
     default:
       console.error(`未知命令: ${cmd}`);
       console.error('运行 `interval-claude --help` 查看可用命令');
@@ -91,6 +94,7 @@ function printHelp() {
   use <name>                    全局切换 Keychain (所有终端立即生效)
   ping <name>                   手动 ping 某帐号（测试用）
   watch                         实时仪表盘 (Ctrl+C 退出)
+  tui                           实时多帐号仪表盘（按 q 退出）
   --help, -h                    显示此帮助
   --version, -v                 显示版本
 
