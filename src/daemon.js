@@ -16,7 +16,7 @@ import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { loadConfig } from './config.js';
+import { loadConfig, saveConfig, setCredentials, setLastUsage } from './config.js';
 import {
   loadState,
   recordPing,
@@ -27,6 +27,7 @@ import {
 import { dueAccounts } from './scheduler.js';
 import { pingWithRetry } from './pinger.js';
 import { appendLog } from './logger.js';
+import { queryUsageWithRefresh } from './oauth.js';
 
 const DEFAULT_CHECK_INTERVAL_MS = 60_000;
 const STOP_GRACE_MS = 5_000;
@@ -43,6 +44,59 @@ async function interruptibleSleep(ms, shouldStop) {
     const chunk = Math.min(step, ms - elapsed);
     await new Promise((r) => setTimeout(r, chunk));
     elapsed += chunk;
+  }
+}
+
+/**
+ * 在 ping 成功后调用：查 usage、自动续期临期 token，回写 config。
+ * 此操作失败不影响 ping 主流程（v0.1 legacy_token 没法查 usage，直接跳过）。
+ */
+async function refreshUsageAndToken(accountName, logFn) {
+  let config;
+  try {
+    config = await loadConfig();
+  } catch (err) {
+    logFn(`usage refresh: 加载 config 失败 ${err?.message ?? err}`);
+    return;
+  }
+  const account = config.accounts.find((a) => a.name === accountName);
+  if (!account?.credentials) return;
+  try {
+    const { usage, credentials } = await queryUsageWithRefresh(account.credentials);
+    config = setLastUsage(config, accountName, usage);
+    if (credentials.accessToken !== account.credentials.accessToken) {
+      config = setCredentials(config, accountName, credentials);
+      logFn(`token refreshed for ${accountName}`);
+    }
+    await saveConfig(config);
+  } catch (err) {
+    logFn(`usage refresh failed for ${accountName}: ${err?.message ?? err}`);
+  }
+}
+
+/**
+ * 拉取目标帐号的 usage，并在 token 刷新时回写 config。
+ * 单独函数便于隔离错误 — 此操作失败不影响 ping 主流程。
+ * v0.1 的 legacy_token 账户无法查询 usage，自动跳过。
+ */
+async function refreshUsageAndToken(accountName, logFn) {
+  let config = await loadConfig();
+  const account = config.accounts.find((a) => a.name === accountName);
+  if (!account?.credentials) return; // v0.1 legacy_token，跳过
+  try {
+    const { usage, credentials } = await queryUsageWithRefresh(
+      account.credentials
+    );
+    config = setLastUsage(config, accountName, usage);
+    if (credentials.accessToken !== account.credentials.accessToken) {
+      config = setCredentials(config, accountName, credentials);
+      logFn(`token refreshed for ${accountName}`);
+    }
+    await saveConfig(config);
+  } catch (err) {
+    logFn(
+      `usage refresh failed for ${accountName}: ${err?.message ?? err}`
+    );
   }
 }
 
@@ -97,6 +151,8 @@ export async function runDaemon(options = {}) {
         if (success) {
           await recordPing(account.name, nowFn().toISOString());
           logFn(`[${tsIso}] ping ${account.name}: OK`);
+          // v0.2: 拉 usage + 自动续期
+          await refreshUsageAndToken(account.name, logFn);
         } else {
           const detail =
             result?.lastResult?.stderr ||
