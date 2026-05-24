@@ -1,246 +1,442 @@
-// scheduler.js 单元测试
-// 所有测试使用固定时间，避免依赖 Date.now()
+// scheduler.js v0.3 单元测试
+//
+// 覆盖：health 公式各分支、needsSwitch、bestSwitchCandidate、shouldPrePing、schedule。
+// 所有测试用固定时间，避免依赖 Date.now()。
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  nextPingTime,
-  shouldPingNow,
-  dueAccounts,
-  estimatedRemainingMinutes,
-  recommendedAccount,
+  health,
+  needsSwitch,
+  bestSwitchCandidate,
+  shouldPrePing,
+  schedule,
+  DEFAULT_SUB_WEIGHTS,
+  ACTION_PING,
+  ACTION_USE,
 } from '../src/scheduler.js';
 
-// ─── Fixtures ────────────────────────────────────────────────────────────────
+const T0 = new Date('2026-05-24T09:00:00.000Z').getTime();
 
-const T0 = new Date('2026-05-23T09:00:00.000Z'); // 守护进程启动时间
-const MIN = 60 * 1000;
-
-/** 加分钟工具 */
-function plusMin(date, minutes) {
-  return new Date(date.getTime() + minutes * MIN);
+function mkAccount({
+  name,
+  sub = 'pro',
+  usage = null,
+  resetsAt = null,
+  windowStart = null,
+  limitReachedAt = null,
+}) {
+  const a = { name, offset_minutes: 0 };
+  if (sub) {
+    a.credentials = { subscriptionType: sub, accessToken: `tok-${name}` };
+  }
+  if (usage != null || resetsAt) {
+    a.last_usage = {
+      five_hour: {
+        utilization: usage ?? 0,
+        resets_at: resetsAt,
+      },
+    };
+  }
+  if (windowStart) a.window_start = windowStart;
+  if (limitReachedAt) a.limit_reached_at = limitReachedAt;
+  return a;
 }
 
-/** 构造 3 帐号默认配置 */
-function makeConfig3() {
+function mkCfg(overrides = {}) {
   return {
-    interval_minutes: 100,
-    ping_prompt: 'hi',
-    accounts: [
-      { name: 'primary', token: 't1', offset_minutes: 0 },
-      { name: 'secondary', token: 't2', offset_minutes: 100 },
-      { name: 'tertiary', token: 't3', offset_minutes: 200 },
-    ],
-  };
-}
-
-/** 构造 2 帐号配置 */
-function makeConfig2() {
-  return {
-    interval_minutes: 100,
-    ping_prompt: 'hi',
-    accounts: [
-      { name: 'primary', token: 't1', offset_minutes: 0 },
-      { name: 'secondary', token: 't2', offset_minutes: 100 },
-    ],
-  };
-}
-
-/** 构造默认 state（已启动，未 ping） */
-function makeState(overrides = {}) {
-  return {
-    daemon_pid: 1234,
-    started_at: T0.toISOString(),
-    last_pings: {},
-    ...overrides,
-  };
-}
-
-// ─── nextPingTime ────────────────────────────────────────────────────────────
-
-test('nextPingTime: 首次 ping primary (offset=0) = started_at', () => {
-  const config = makeConfig3();
-  const state = makeState();
-  const next = nextPingTime(config.accounts[0], state, config, config.accounts);
-  assert.equal(next.getTime(), T0.getTime());
-});
-
-test('nextPingTime: 首次 ping secondary (offset=100) = started_at + 100min', () => {
-  const config = makeConfig3();
-  const state = makeState();
-  const next = nextPingTime(config.accounts[1], state, config, config.accounts);
-  assert.equal(next.getTime(), plusMin(T0, 100).getTime());
-});
-
-test('nextPingTime: 首次 ping tertiary (offset=200) = started_at + 200min', () => {
-  const config = makeConfig3();
-  const state = makeState();
-  const next = nextPingTime(config.accounts[2], state, config, config.accounts);
-  assert.equal(next.getTime(), plusMin(T0, 200).getTime());
-});
-
-test('nextPingTime: primary 已 ping，3 帐号 → 下次 = last_ping + 300min', () => {
-  const config = makeConfig3();
-  const lastPing = plusMin(T0, 0).toISOString();
-  const state = makeState({ last_pings: { primary: lastPing } });
-  const next = nextPingTime(config.accounts[0], state, config, config.accounts);
-  assert.equal(next.getTime(), plusMin(new Date(lastPing), 300).getTime());
-});
-
-test('nextPingTime: secondary 已 ping，2 帐号 → 下次 = last_ping + 200min', () => {
-  const config = makeConfig2();
-  const lastPing = plusMin(T0, 100).toISOString();
-  const state = makeState({ last_pings: { secondary: lastPing } });
-  const next = nextPingTime(config.accounts[1], state, config, config.accounts);
-  assert.equal(next.getTime(), plusMin(new Date(lastPing), 200).getTime());
-});
-
-// ─── shouldPingNow ───────────────────────────────────────────────────────────
-
-test('shouldPingNow: 启动瞬间立即 ping primary (now == started_at) → true', () => {
-  const config = makeConfig3();
-  const state = makeState();
-  const result = shouldPingNow(config.accounts[0], state, config, config.accounts, T0);
-  assert.equal(result, true);
-});
-
-test('shouldPingNow: secondary 还没到时间 (now < offset) → false', () => {
-  const config = makeConfig3();
-  const state = makeState();
-  // 启动 50 分钟后，secondary (offset=100) 还没到
-  const now = plusMin(T0, 50);
-  const result = shouldPingNow(config.accounts[1], state, config, config.accounts, now);
-  assert.equal(result, false);
-});
-
-test('shouldPingNow: secondary 到时间了 (now == started_at + 100min) → true', () => {
-  const config = makeConfig3();
-  const state = makeState();
-  const now = plusMin(T0, 100);
-  const result = shouldPingNow(config.accounts[1], state, config, config.accounts, now);
-  assert.equal(result, true);
-});
-
-test('shouldPingNow: primary 已 ping，未到下个周期 → false', () => {
-  const config = makeConfig3();
-  const lastPing = T0.toISOString();
-  const state = makeState({ last_pings: { primary: lastPing } });
-  // 才过了 50 分钟，距离下次 300min 还远
-  const now = plusMin(T0, 50);
-  const result = shouldPingNow(config.accounts[0], state, config, config.accounts, now);
-  assert.equal(result, false);
-});
-
-test('shouldPingNow: primary 已 ping，到了下个周期 → true', () => {
-  const config = makeConfig3();
-  const lastPing = T0.toISOString();
-  const state = makeState({ last_pings: { primary: lastPing } });
-  const now = plusMin(T0, 300);
-  const result = shouldPingNow(config.accounts[0], state, config, config.accounts, now);
-  assert.equal(result, true);
-});
-
-// ─── dueAccounts ─────────────────────────────────────────────────────────────
-
-test('dueAccounts: 启动瞬间只有 primary due', () => {
-  const config = makeConfig3();
-  const state = makeState();
-  const due = dueAccounts(state, config, T0);
-  assert.equal(due.length, 1);
-  assert.equal(due[0].name, 'primary');
-});
-
-test('dueAccounts: 启动 100min 后 primary 已 ping，只有 secondary due', () => {
-  const config = makeConfig3();
-  const state = makeState({
-    last_pings: { primary: T0.toISOString() },
-  });
-  const now = plusMin(T0, 100);
-  const due = dueAccounts(state, config, now);
-  assert.equal(due.length, 1);
-  assert.equal(due[0].name, 'secondary');
-});
-
-test('dueAccounts: 启动 100min 后 primary 未 ping，primary + secondary 都 due（按 offset 排序）', () => {
-  // 边界场景：守护进程错过了 primary 的 ping（崩溃等），现在两个都该 ping
-  const config = makeConfig3();
-  const state = makeState();
-  const now = plusMin(T0, 100);
-  const due = dueAccounts(state, config, now);
-  assert.equal(due.length, 2);
-  assert.equal(due[0].name, 'primary');   // offset=0 排前
-  assert.equal(due[1].name, 'secondary'); // offset=100 排后
-});
-
-// ─── estimatedRemainingMinutes ───────────────────────────────────────────────
-
-test('estimatedRemainingMinutes: 未 ping 过 → null', () => {
-  const state = makeState();
-  const account = { name: 'primary', offset_minutes: 0 };
-  const remaining = estimatedRemainingMinutes(account, state, T0);
-  assert.equal(remaining, null);
-});
-
-test('estimatedRemainingMinutes: 刚 ping 完 → 300 (5h)', () => {
-  const account = { name: 'primary', offset_minutes: 0 };
-  const lastPing = T0.toISOString();
-  const state = makeState({ last_pings: { primary: lastPing } });
-  const remaining = estimatedRemainingMinutes(account, state, T0);
-  assert.equal(remaining, 300);
-});
-
-test('estimatedRemainingMinutes: ping 60min 后 → 240', () => {
-  const account = { name: 'primary', offset_minutes: 0 };
-  const lastPing = T0.toISOString();
-  const state = makeState({ last_pings: { primary: lastPing } });
-  const now = plusMin(T0, 60);
-  const remaining = estimatedRemainingMinutes(account, state, now);
-  assert.equal(remaining, 240);
-});
-
-test('estimatedRemainingMinutes: 已超过 5h → 0（不返回负数）', () => {
-  const account = { name: 'primary', offset_minutes: 0 };
-  const lastPing = T0.toISOString();
-  const state = makeState({ last_pings: { primary: lastPing } });
-  const now = plusMin(T0, 400); // 超 5h * 60min
-  const remaining = estimatedRemainingMinutes(account, state, now);
-  assert.equal(remaining, 0);
-});
-
-// ─── recommendedAccount ──────────────────────────────────────────────────────
-
-test('recommendedAccount: 全都没 ping → 返回 primary (offset 最小)', () => {
-  const config = makeConfig3();
-  const state = makeState();
-  const rec = recommendedAccount(state, config, T0);
-  assert.equal(rec.name, 'primary');
-});
-
-test('recommendedAccount: 只有 primary ping 过 → 返回 primary（其他剩余为 null 不参与比较）', () => {
-  const config = makeConfig3();
-  const lastPing = T0.toISOString();
-  const state = makeState({ last_pings: { primary: lastPing } });
-  // 5min 后查询
-  const rec = recommendedAccount(state, config, plusMin(T0, 5));
-  assert.equal(rec.name, 'primary');
-});
-
-test('recommendedAccount: primary 和 secondary 都 ping 过，secondary 更新鲜 → 返回 secondary', () => {
-  const config = makeConfig3();
-  const state = makeState({
-    last_pings: {
-      primary: T0.toISOString(),                 // 较早
-      secondary: plusMin(T0, 100).toISOString(), // 较晚 → 剩余多
+    scheduler: {
+      sub_weights: DEFAULT_SUB_WEIGHTS,
+      expire_threshold_min: 3,
+      stagger_min: null, // 自动 300/N
+      ...overrides,
     },
-  });
-  // now = T0+150min
-  const rec = recommendedAccount(state, config, plusMin(T0, 150));
-  assert.equal(rec.name, 'secondary');
+  };
+}
+
+// === health() ===
+
+test('health: 未激活 (Pro) → 1 × 300 = 300', () => {
+  const a = mkAccount({ name: 'a', sub: 'pro' });
+  assert.equal(health(a, mkCfg(), T0), 300);
 });
 
-test('recommendedAccount: 帐号列表为空 → null', () => {
-  const config = { interval_minutes: 100, ping_prompt: 'hi', accounts: [] };
-  const state = makeState();
-  const rec = recommendedAccount(state, config, T0);
-  assert.equal(rec, null);
+test('health: 未激活 (max_5x) → 5 × 300 = 1500', () => {
+  const a = mkAccount({ name: 'a', sub: 'max_5x' });
+  assert.equal(health(a, mkCfg(), T0), 1500);
+});
+
+test('health: 未激活 (max_20x) → 20 × 300 = 6000', () => {
+  const a = mkAccount({ name: 'a', sub: 'max_20x' });
+  assert.equal(health(a, mkCfg(), T0), 6000);
+});
+
+test('health: 耗尽 → 0', () => {
+  const a = mkAccount({
+    name: 'a',
+    sub: 'pro',
+    usage: 1.0,
+    resetsAt: new Date(T0 + 60 * 60 * 1000).toISOString(),
+  });
+  assert.equal(health(a, mkCfg(), T0), 0);
+});
+
+test('health: 即将过期 (<3min) → 0', () => {
+  const a = mkAccount({
+    name: 'a',
+    sub: 'pro',
+    usage: 0.5,
+    resetsAt: new Date(T0 + 2 * 60 * 1000).toISOString(),
+  });
+  assert.equal(health(a, mkCfg(), T0), 0);
+});
+
+test('health: 窗口已过期 → 视为未激活 (满血)', () => {
+  const a = mkAccount({
+    name: 'a',
+    sub: 'pro',
+    usage: 0.5,
+    resetsAt: new Date(T0 - 60 * 60 * 1000).toISOString(),
+  });
+  assert.equal(health(a, mkCfg(), T0), 300);
+});
+
+test('health: 活跃中 (Pro, usage=0.5, 剩 60min) → 1 × 0.5 × 60 = 30', () => {
+  const a = mkAccount({
+    name: 'a',
+    sub: 'pro',
+    usage: 0.5,
+    resetsAt: new Date(T0 + 60 * 60 * 1000).toISOString(),
+  });
+  assert.equal(health(a, mkCfg(), T0), 30);
+});
+
+test('health: 活跃中 (max_5x, usage=0.2, 剩 240min) → 5 × 0.8 × 240 = 960', () => {
+  const a = mkAccount({
+    name: 'a',
+    sub: 'max_5x',
+    usage: 0.2,
+    resetsAt: new Date(T0 + 240 * 60 * 1000).toISOString(),
+  });
+  assert.equal(health(a, mkCfg(), T0), 960);
+});
+
+test('health: 未知 sub → _default 权重 (1)', () => {
+  const a = mkAccount({ name: 'a', sub: 'enterprise_xx' });
+  assert.equal(health(a, mkCfg(), T0), 300); // 1 × 300
+});
+
+// === needsSwitch() ===
+
+test('needsSwitch: active=null → true', () => {
+  assert.equal(needsSwitch(null, mkCfg(), T0), true);
+});
+
+test('needsSwitch: usage 100% → true', () => {
+  const a = mkAccount({
+    name: 'a',
+    usage: 1.0,
+    resetsAt: new Date(T0 + 60 * 60 * 1000).toISOString(),
+  });
+  assert.equal(needsSwitch(a, mkCfg(), T0), true);
+});
+
+test('needsSwitch: 窗口过期 → true', () => {
+  const a = mkAccount({
+    name: 'a',
+    usage: 0.3,
+    resetsAt: new Date(T0 - 60 * 1000).toISOString(),
+  });
+  assert.equal(needsSwitch(a, mkCfg(), T0), true);
+});
+
+test('needsSwitch: limit_reached 最近 10min → true', () => {
+  const a = mkAccount({
+    name: 'a',
+    usage: 0.5,
+    resetsAt: new Date(T0 + 60 * 60 * 1000).toISOString(),
+    limitReachedAt: T0 - 5 * 60 * 1000,
+  });
+  assert.equal(needsSwitch(a, mkCfg(), T0), true);
+});
+
+test('needsSwitch: limit_reached 超过 10min → false (过期标记)', () => {
+  const a = mkAccount({
+    name: 'a',
+    usage: 0.3,
+    resetsAt: new Date(T0 + 60 * 60 * 1000).toISOString(),
+    limitReachedAt: T0 - 15 * 60 * 1000,
+  });
+  assert.equal(needsSwitch(a, mkCfg(), T0), false);
+});
+
+test('needsSwitch: 健康正常 → false', () => {
+  const a = mkAccount({
+    name: 'a',
+    usage: 0.3,
+    resetsAt: new Date(T0 + 60 * 60 * 1000).toISOString(),
+  });
+  assert.equal(needsSwitch(a, mkCfg(), T0), false);
+});
+
+// === bestSwitchCandidate() ===
+
+test('bestSwitchCandidate: 排除自己 + 选健康度最高', () => {
+  const accounts = [
+    mkAccount({ name: 'A', sub: 'pro' }), // 未激活 → 300
+    mkAccount({ name: 'B', sub: 'max_5x' }), // 未激活 → 1500
+    mkAccount({
+      name: 'C',
+      sub: 'pro',
+      usage: 1.0,
+      resetsAt: new Date(T0 + 60 * 60 * 1000).toISOString(),
+    }), // 耗尽 → 0
+  ];
+  const result = bestSwitchCandidate(accounts, accounts[2], mkCfg(), T0);
+  assert.equal(result.name, 'B');
+});
+
+test('bestSwitchCandidate: 全耗尽 → null', () => {
+  const accounts = [
+    mkAccount({
+      name: 'A',
+      usage: 1.0,
+      resetsAt: new Date(T0 + 60 * 60 * 1000).toISOString(),
+    }),
+    mkAccount({
+      name: 'B',
+      usage: 1.0,
+      resetsAt: new Date(T0 + 60 * 60 * 1000).toISOString(),
+    }),
+  ];
+  const result = bestSwitchCandidate(accounts, accounts[0], mkCfg(), T0);
+  assert.equal(result, null);
+});
+
+test('bestSwitchCandidate: exclude=null → 包含所有有效帐号', () => {
+  const accounts = [
+    mkAccount({ name: 'A', sub: 'pro' }),
+    mkAccount({ name: 'B', sub: 'max_5x' }),
+  ];
+  const result = bestSwitchCandidate(accounts, null, mkCfg(), T0);
+  assert.equal(result.name, 'B');
+});
+
+// === shouldPrePing() ===
+
+test('shouldPrePing: elapsed=75min 触发第 1 备用 (4 帐号, stagger=75)', () => {
+  const active = mkAccount({
+    name: 'M',
+    sub: 'max_5x',
+    usage: 0.1,
+    resetsAt: new Date(T0 + 225 * 60 * 1000).toISOString(),
+    windowStart: T0 - 75 * 60 * 1000,
+  });
+  const accounts = [
+    active,
+    mkAccount({ name: 'A', sub: 'pro' }),
+    mkAccount({ name: 'B', sub: 'pro' }),
+    mkAccount({ name: 'C', sub: 'pro' }),
+  ];
+  const result = shouldPrePing(accounts, active, mkCfg(), T0);
+  assert.ok(result, '应该返回一个未激活帐号');
+  // A/B/C 同 sub 同 health，sort 稳定性可能不固定 — 只要返回任一即可
+  assert.ok(['A', 'B', 'C'].includes(result.name));
+});
+
+test('shouldPrePing: usage=25% 触发第 1 备用 (即使时间未到)', () => {
+  const active = mkAccount({
+    name: 'M',
+    sub: 'max_5x',
+    usage: 0.25,
+    resetsAt: new Date(T0 + 290 * 60 * 1000).toISOString(),
+    windowStart: T0 - 10 * 60 * 1000,
+  });
+  const accounts = [
+    active,
+    mkAccount({ name: 'A', sub: 'pro' }),
+    mkAccount({ name: 'B', sub: 'pro' }),
+    mkAccount({ name: 'C', sub: 'pro' }),
+  ];
+  const result = shouldPrePing(accounts, active, mkCfg(), T0);
+  assert.ok(result, '应该返回一个未激活帐号 (usage 触发)');
+});
+
+test('shouldPrePing: 没到时间也没到进度 → null', () => {
+  const active = mkAccount({
+    name: 'M',
+    sub: 'max_5x',
+    usage: 0.1,
+    resetsAt: new Date(T0 + 270 * 60 * 1000).toISOString(),
+    windowStart: T0 - 30 * 60 * 1000,
+  });
+  const accounts = [
+    active,
+    mkAccount({ name: 'A', sub: 'pro' }),
+    mkAccount({ name: 'B', sub: 'pro' }),
+    mkAccount({ name: 'C', sub: 'pro' }),
+  ];
+  const result = shouldPrePing(accounts, active, mkCfg(), T0);
+  assert.equal(result, null);
+});
+
+test('shouldPrePing: 已有 1 备用在跑 → next_index=1, 触发第 2 备用 (elapsed=150min)', () => {
+  const active = mkAccount({
+    name: 'M',
+    sub: 'max_5x',
+    usage: 0.4,
+    resetsAt: new Date(T0 + 150 * 60 * 1000).toISOString(),
+    windowStart: T0 - 150 * 60 * 1000,
+  });
+  const accounts = [
+    active,
+    mkAccount({
+      name: 'A',
+      sub: 'pro',
+      usage: 0.05,
+      resetsAt: new Date(T0 + 225 * 60 * 1000).toISOString(),
+      windowStart: T0 - 75 * 60 * 1000,
+    }),
+    mkAccount({ name: 'B', sub: 'pro' }),
+    mkAccount({ name: 'C', sub: 'pro' }),
+  ];
+  const result = shouldPrePing(accounts, active, mkCfg(), T0);
+  assert.ok(result);
+  assert.ok(['B', 'C'].includes(result.name));
+});
+
+test('shouldPrePing: 所有备用都启动了 → null', () => {
+  const active = mkAccount({
+    name: 'M',
+    sub: 'max_5x',
+    usage: 0.1,
+    resetsAt: new Date(T0 + 250 * 60 * 1000).toISOString(),
+    windowStart: T0 - 50 * 60 * 1000,
+  });
+  const accounts = [
+    active,
+    mkAccount({
+      name: 'A',
+      sub: 'pro',
+      usage: 0.1,
+      resetsAt: new Date(T0 + 250 * 60 * 1000).toISOString(),
+    }),
+  ];
+  const result = shouldPrePing(accounts, active, mkCfg(), T0);
+  assert.equal(result, null);
+});
+
+test('shouldPrePing: N=1 → null (单帐号无错峰)', () => {
+  const active = mkAccount({ name: 'M', sub: 'pro' });
+  const result = shouldPrePing([active], active, mkCfg(), T0);
+  assert.equal(result, null);
+});
+
+// === schedule() ===
+
+test('schedule: 冷启动 (active=null) → 选健康度最高 + 返回 PING+USE', () => {
+  const accounts = [
+    mkAccount({ name: 'A', sub: 'pro' }),
+    mkAccount({ name: 'B', sub: 'max_5x' }),
+    mkAccount({ name: 'C', sub: 'pro' }),
+  ];
+  const actions = schedule(accounts, null, mkCfg(), T0);
+  assert.equal(actions.length, 2);
+  assert.equal(actions[0].type, ACTION_PING);
+  assert.equal(actions[0].account.name, 'B');
+  assert.equal(actions[1].type, ACTION_USE);
+  assert.equal(actions[1].account.name, 'B');
+});
+
+test('schedule: 主帐号耗尽 + 备用未激活 → PING + USE 备用', () => {
+  const active = mkAccount({
+    name: 'M',
+    sub: 'pro',
+    usage: 1.0,
+    resetsAt: new Date(T0 + 60 * 60 * 1000).toISOString(),
+  });
+  const accounts = [
+    active,
+    mkAccount({ name: 'A', sub: 'max_5x' }),
+    mkAccount({ name: 'B', sub: 'pro' }),
+  ];
+  const actions = schedule(accounts, active, mkCfg(), T0);
+  assert.equal(actions.length, 2);
+  assert.equal(actions[0].type, ACTION_PING);
+  assert.equal(actions[0].account.name, 'A');
+  assert.equal(actions[1].type, ACTION_USE);
+});
+
+test('schedule: 主帐号耗尽 + 备用已激活 → 只 USE', () => {
+  const active = mkAccount({
+    name: 'M',
+    sub: 'pro',
+    usage: 1.0,
+    resetsAt: new Date(T0 + 60 * 60 * 1000).toISOString(),
+  });
+  const accounts = [
+    active,
+    mkAccount({
+      name: 'A',
+      sub: 'max_5x',
+      usage: 0.05,
+      resetsAt: new Date(T0 + 240 * 60 * 1000).toISOString(),
+    }),
+  ];
+  const actions = schedule(accounts, active, mkCfg(), T0);
+  assert.equal(actions.length, 1);
+  assert.equal(actions[0].type, ACTION_USE);
+  assert.equal(actions[0].account.name, 'A');
+});
+
+test('schedule: 主帐号健康 + 该预 ping → 仅 PING', () => {
+  const active = mkAccount({
+    name: 'M',
+    sub: 'max_5x',
+    usage: 0.3,
+    resetsAt: new Date(T0 + 220 * 60 * 1000).toISOString(),
+    windowStart: T0 - 80 * 60 * 1000,
+  });
+  const accounts = [
+    active,
+    mkAccount({ name: 'A', sub: 'pro' }),
+    mkAccount({ name: 'B', sub: 'pro' }),
+    mkAccount({ name: 'C', sub: 'pro' }),
+  ];
+  const actions = schedule(accounts, active, mkCfg(), T0);
+  assert.equal(actions.length, 1);
+  assert.equal(actions[0].type, ACTION_PING);
+});
+
+test('schedule: 没动作 → 空数组', () => {
+  const active = mkAccount({
+    name: 'M',
+    sub: 'max_5x',
+    usage: 0.1,
+    resetsAt: new Date(T0 + 290 * 60 * 1000).toISOString(),
+    windowStart: T0 - 10 * 60 * 1000,
+  });
+  const accounts = [active];
+  const actions = schedule(accounts, active, mkCfg(), T0);
+  assert.deepEqual(actions, []);
+});
+
+test('schedule: 全部耗尽 → 空数组', () => {
+  const active = mkAccount({
+    name: 'M',
+    sub: 'pro',
+    usage: 1.0,
+    resetsAt: new Date(T0 + 60 * 60 * 1000).toISOString(),
+  });
+  const accounts = [
+    active,
+    mkAccount({
+      name: 'A',
+      sub: 'pro',
+      usage: 1.0,
+      resetsAt: new Date(T0 + 60 * 60 * 1000).toISOString(),
+    }),
+  ];
+  const actions = schedule(accounts, active, mkCfg(), T0);
+  assert.deepEqual(actions, []);
 });
