@@ -23,6 +23,21 @@ function defaultSleep(ms) {
 }
 
 /**
+ * 检测 claude 输出是否表示 "limit reached"（额度已耗尽）。
+ * Claude CLI 返回额度问题时的 stdout/stderr 包含 "hit your limit" / "resets at" 等关键字。
+ */
+function detectLimitReached(stdout, stderr) {
+  const text = `${stdout || ''}\n${stderr || ''}`.toLowerCase();
+  return (
+    text.includes("you've hit your limit") ||
+    text.includes('rate limit') ||
+    text.includes('quota exceeded') ||
+    text.includes('limit · resets') ||
+    text.includes('limit. resets')
+  );
+}
+
+/**
  * Ping 一个帐号 — 设置 CLAUDE_CODE_OAUTH_TOKEN 环境变量后调 claude -p
  *
  * @param {{name: string, token: string, offset_minutes?: number}} account
@@ -128,7 +143,8 @@ export async function pingAccount(account, prompt, options = {}) {
     function finalize(code, signal) {
       const stdout = Buffer.concat(stdoutChunks).toString('utf8');
       const stderr = Buffer.concat(stderrChunks).toString('utf8');
-      const success = !timedOut && code === 0;
+      const limitReached = detectLimitReached(stdout, stderr);
+      const success = !timedOut && code === 0 && !limitReached;
       settle({
         success,
         code: typeof code === 'number' ? code : null,
@@ -137,6 +153,7 @@ export async function pingAccount(account, prompt, options = {}) {
         timedOut,
         durationMs: Date.now() - startedAt,
         signal: signal ?? null,
+        limitReached,
       });
     }
 

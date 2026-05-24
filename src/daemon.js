@@ -24,10 +24,12 @@ import {
   clearDaemonPid,
   isDaemonAlive,
 } from './state.js';
-import { dueAccounts } from './scheduler.js';
+import { dueAccounts, schedule, ACTION_PING, ACTION_USE, health } from './scheduler.js';
 import { pingWithRetry } from './pinger.js';
 import { appendLog } from './logger.js';
 import { queryUsageWithRefresh } from './oauth.js';
+import { sendNotification } from './notifier.js';
+import { isKeychainSupported, readKeychainRaw, parseClaudeCredentials } from './keychain.js';
 
 const DEFAULT_CHECK_INTERVAL_MS = 60_000;
 const STOP_GRACE_MS = 5_000;
@@ -93,51 +95,127 @@ export async function runDaemon(options = {}) {
   const nowFn = options.nowFn ?? (() => new Date());
   const shouldStop = options.shouldStop ?? (() => false);
 
-  logFn('daemon: 主循环启动');
+  logFn('daemon: 主循环启动 (v0.3 动态调度)');
+
+  // 内存状态：避免重复通知"全满"
+  let allExhaustedNotified = false;
+  // 内存状态：跟踪 limit_reached 标记（按帐号名）
+  const limitReachedAt = new Map();
 
   while (!shouldStop()) {
     let config;
-    let state;
     try {
       config = await loadConfig();
-      state = await loadState();
     } catch (err) {
-      logFn(`daemon: 读取 config/state 失败: ${err?.message ?? err}`);
+      logFn(`daemon: load config 失败: ${err?.message ?? err}`);
       await interruptibleSleep(checkIntervalMs, shouldStop);
       continue;
     }
 
-    const now = nowFn();
-    let due;
-    try {
-      due = dueAccounts(state, config, now);
-    } catch (err) {
-      logFn(`daemon: dueAccounts 计算失败: ${err?.message ?? err}`);
-      due = [];
+    if (config.scheduler?.enabled === false) {
+      logFn('daemon: scheduler.enabled=false, 跳过');
+      await interruptibleSleep(checkIntervalMs, shouldStop);
+      continue;
     }
 
-    for (const account of due) {
-      if (shouldStop()) break;
-      const tsIso = nowFn().toISOString();
+    // 把 limit_reached 标记合并到帐号对象，供 needsSwitch 用
+    for (const a of config.accounts) {
+      const ts = limitReachedAt.get(a.name);
+      if (ts) a.limit_reached_at = ts;
+    }
+
+    // 识别当前活跃帐号（通过 Keychain）
+    let active = null;
+    if (isKeychainSupported()) {
       try {
-        const result = await pingFn(account, config.ping_prompt);
-        const success = !!result?.success;
-        if (success) {
-          await recordPing(account.name, nowFn().toISOString());
-          logFn(`[${tsIso}] ping ${account.name}: OK`);
-          // v0.2: 拉 usage + 自动续期
-          await refreshUsageAndToken(account.name, logFn);
-        } else {
-          const detail =
-            result?.lastResult?.stderr ||
-            result?.stderr ||
-            result?.lastResult?.code ||
-            'unknown';
-          logFn(`[${tsIso}] ping ${account.name}: FAIL (${String(detail).trim()})`);
+        const raw = readKeychainRaw();
+        if (raw) {
+          const creds = parseClaudeCredentials(raw);
+          active = config.accounts.find(
+            (a) => a.credentials?.accessToken === creds.accessToken,
+          );
         }
-      } catch (err) {
-        // 单帐号异常吞掉，不让循环挂掉
-        logFn(`[${tsIso}] ping ${account.name}: ERROR ${err?.message ?? err}`);
+      } catch {
+        /* ignore */
+      }
+    }
+
+    const nowMs = nowFn().getTime();
+    let actions;
+    try {
+      actions = schedule(config.accounts, active, config, nowMs);
+    } catch (err) {
+      logFn(`daemon: schedule() 失败: ${err?.message ?? err}`);
+      await interruptibleSleep(checkIntervalMs, shouldStop);
+      continue;
+    }
+
+    if (actions.length === 0) {
+      // 检测全满状态
+      const hasAnyHealthy = config.accounts.some(
+        (a) => health(a, config, nowMs) > 0,
+      );
+      if (!hasAnyHealthy && !allExhaustedNotified) {
+        const earliest = findEarliestReset(config.accounts, nowMs);
+        const msg = earliest
+          ? `所有帐号耗尽 — 最早重置: ${earliest.name} (${earliest.remainingMin}m 后)`
+          : '所有帐号耗尽且无重置时间信息';
+        logFn(`daemon: ${msg}`);
+        if (config.scheduler?.notify !== false) {
+          await sendNotification({
+            title: 'intervalClaude',
+            subtitle: '⚠️ 所有帐号耗尽',
+            message: msg,
+          });
+        }
+        allExhaustedNotified = true;
+      }
+      await interruptibleSleep(checkIntervalMs, shouldStop);
+      continue;
+    }
+
+    // 执行动作
+    for (const act of actions) {
+      if (shouldStop()) break;
+      const target = act.account;
+      const tsIso = nowFn().toISOString();
+      const h = Math.round(health(target, config, nowMs));
+
+      if (act.type === ACTION_PING) {
+        logFn(`[${tsIso}] schedule: PING ${target.name} (health=${h})`);
+        try {
+          const result = await pingFn(target, config.ping_prompt);
+          if (result?.success) {
+            await recordPing(target.name, nowFn().toISOString());
+            limitReachedAt.delete(target.name);
+            logFn(`[${tsIso}] PING ${target.name}: OK`);
+            await refreshUsageAndToken(target.name, logFn);
+            allExhaustedNotified = false;
+          } else if (result?.limitReached) {
+            limitReachedAt.set(target.name, nowMs);
+            logFn(`[${tsIso}] PING ${target.name}: LIMIT_REACHED`);
+          } else {
+            const detail = result?.stderr || result?.lastResult?.stderr || result?.code || 'unknown';
+            logFn(`[${tsIso}] PING ${target.name}: FAIL (${String(detail).trim()})`);
+          }
+        } catch (err) {
+          logFn(`[${tsIso}] PING ${target.name}: ERROR ${err?.message ?? err}`);
+        }
+      } else if (act.type === ACTION_USE) {
+        logFn(`[${tsIso}] schedule: USE ${target.name} (health=${h})`);
+        try {
+          await performUseFromDaemon(target.name);
+          if (config.scheduler?.notify !== false) {
+            await sendNotification({
+              title: 'intervalClaude',
+              subtitle: '已切换帐号',
+              message: `当前活跃: ${target.name}`,
+            });
+          }
+          allExhaustedNotified = false;
+        } catch (err) {
+          logFn(`[${tsIso}] USE ${target.name} 失败: ${err?.message ?? err}`);
+        }
       }
     }
 
@@ -146,6 +224,28 @@ export async function runDaemon(options = {}) {
   }
 
   logFn('daemon: 主循环退出');
+}
+
+/** 找最早重置的帐号 */
+function findEarliestReset(accounts, nowMs) {
+  let best = null;
+  for (const a of accounts) {
+    const ts = a.last_usage?.five_hour?.resets_at;
+    if (!ts) continue;
+    const remainMin = (new Date(ts).getTime() - nowMs) / 60_000;
+    if (remainMin <= 0) continue;
+    if (!best || remainMin < best.remainingMin) {
+      best = { name: a.name, remainingMin: Math.round(remainMin) };
+    }
+  }
+  return best;
+}
+
+/** daemon 内调用 use 命令的核心 — 简化版，不退出进程 */
+async function performUseFromDaemon(name) {
+  // 用 dynamic import 避免循环依赖
+  const useModule = await import('./commands/use.js');
+  await useModule.default([name]);
 }
 
 /**
