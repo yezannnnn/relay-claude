@@ -84,6 +84,7 @@ function printHelp() {
   add [name] [--offset N]       从 macOS Keychain 捕获 OAuth 凭证
                                   无参数 → 交互式批量
                                   需先 claude /login 登录目标帐号
+                                  ⭐ 同名 → 自动进入更新模式（重新捕获）
   list [--refresh]              列出帐号 + 订阅类型 + usage
   remove <name> [--yes]         删除帐号
   use <name>                    全局切换 Keychain（所有终端立即生效）
@@ -92,7 +93,7 @@ function printHelp() {
                                   别名: switch（v0.1 兼容）
 
 守护进程:
-  start                         启动动态调度（按 sub 等级自动错峰）
+  start [--no-tui]              启动动态调度 + 默认进入 TUI（--no-tui 关闭）
   stop                          停止
   status                        查看状态
   ping <name>                   手动触发 ping

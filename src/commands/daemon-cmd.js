@@ -6,7 +6,7 @@ import { loadConfig } from '../config.js';
 import { startDaemon, stopDaemon, daemonStatus } from '../daemon.js';
 import { getLogPath } from '../logger.js';
 
-export async function startCommand() {
+export async function startCommand(args = []) {
   const config = await loadConfig();
   if ((config.accounts ?? []).length === 0) {
     console.error('未配置任何帐号。先运行 `interval-claude add <name>` 添加帐号。');
@@ -30,10 +30,19 @@ export async function startCommand() {
   const result = await startDaemon();
   if (result.alreadyRunning) {
     console.log(`守护进程已在运行 (pid=${result.pid})`);
-    return;
+  } else {
+    console.log(`\n✅ 守护进程已启动 (pid=${result.pid})`);
+    console.log(`日志: ${getLogPath()}`);
   }
-  console.log(`\n✅ 守护进程已启动 (pid=${result.pid})`);
-  console.log(`日志: ${getLogPath()}`);
+
+  // start 之后默认进入 TUI（除非 --no-tui 或 stdin 不是 TTY）
+  const noTui = args.includes('--no-tui');
+  if (!noTui && process.stdin.isTTY) {
+    // 给 daemon 一点时间初始化
+    await new Promise((r) => setTimeout(r, 500));
+    const tuiModule = await import('./tui.js');
+    await tuiModule.default();
+  }
 }
 
 export async function stopCommand() {

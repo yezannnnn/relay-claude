@@ -4,7 +4,7 @@
 //   2. 单个 name → 单条捕获
 //   3. --offset N → 覆盖自动计算的 offset
 
-import { loadConfig, saveConfig, addAccount, setLastUsage } from '../config.js';
+import { loadConfig, saveConfig, addAccount, setLastUsage, setCredentials } from '../config.js';
 import { readCredentials, isKeychainSupported } from '../keychain.js';
 import { queryUsage } from '../oauth.js';
 import { prompt as ask, closePrompt as close } from './prompt.js';
@@ -29,11 +29,12 @@ export default async function addCommand(args) {
 
 async function captureOne(name, { offsetMinutes }) {
   const config = await loadConfig();
-  if (config.accounts.some(a => a.name === name)) {
-    console.error(`帐号 "${name}" 已存在`);
-    process.exit(1);
-  }
+  const existing = config.accounts.find((a) => a.name === name);
+  const isUpdate = !!existing;
 
+  if (isUpdate) {
+    console.log(`帐号 "${name}" 已存在 — 进入更新模式`);
+  }
   console.log(`请先运行: claude /logout && claude /login`);
   console.log(`（登录目标帐号 "${name}"）`);
   console.log(`登录完成后按回车继续...`);
@@ -59,12 +60,23 @@ async function captureOne(name, { offsetMinutes }) {
     console.warn(`⚠️  usage 查询失败 (${err.message})。继续保存帐号但无 usage 数据。`);
   }
 
-  const autoOffset = offsetMinutes ?? (config.accounts.length * (config.interval_minutes || 100));
-  let newConfig = addAccount(config, { name, credentials, offsetMinutes: autoOffset });
+  let newConfig;
+  if (isUpdate) {
+    // 更新模式：保留 offset_minutes 等其他字段，只覆盖 credentials + last_usage
+    newConfig = setCredentials(config, name, credentials);
+  } else {
+    const autoOffset =
+      offsetMinutes ?? config.accounts.length * (config.interval_minutes || 100);
+    newConfig = addAccount(config, {
+      name,
+      credentials,
+      offsetMinutes: autoOffset,
+    });
+  }
   if (usage) newConfig = setLastUsage(newConfig, name, usage);
   await saveConfig(newConfig);
 
-  console.log(`✅ 已添加 ${name}`);
+  console.log(`✅ ${isUpdate ? '已更新' : '已添加'} ${name}`);
   console.log(`   订阅: ${credentials.subscriptionType || '未知'}`);
   if (usage?.five_hour) {
     const pct = Math.round(usage.five_hour.utilization * 100);
