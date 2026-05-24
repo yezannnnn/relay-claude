@@ -4,7 +4,9 @@
 
 每个 Claude 帐号有 5 小时滚动重置窗口。如果你有 3 个帐号，按 100 分钟错峰激活，可以让三个 5h 窗口拼接覆盖 8-9 小时工作日。
 
-> v0.2 新增：从 macOS Keychain 捕获 OAuth credentials，实时查询 usage / 重置时间 / 订阅类型，自动 token 续期，全局帐号切换（`use` 命令），实时多帐号 TUI 仪表盘。
+> **v0.3 新增**：完全动态调度 — daemon 实时评估帐号健康度，按 sub 等级 + 剩余 usage + 窗口剩余时间打分，自动 ping 维护窗口重叠，主帐号用满自动切换。macOS 系统通知。Max 5x = Pro × 5，Max 20x = Pro × 20。
+>
+> v0.2: OAuth 凭证 + 实时 usage 查询 + `use` 全局切换 + TUI 仪表盘。
 
 ## 工作原理
 

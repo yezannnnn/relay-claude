@@ -21,7 +21,7 @@ import watchCommand from './commands/watch.js';
 import removeCommand from './commands/remove.js';
 import tuiCommand from './commands/tui.js';
 
-const VERSION = '0.2.0';
+const VERSION = '0.3.0';
 
 /**
  * 主入口。args = process.argv.slice(2)
@@ -92,7 +92,7 @@ function printHelp() {
                                   别名: switch（v0.1 兼容）
 
 守护进程:
-  start                         启动（交互式询问错峰激活）
+  start                         启动动态调度（按 sub 等级自动错峰）
   stop                          停止
   status                        查看状态
   ping <name>                   手动触发 ping

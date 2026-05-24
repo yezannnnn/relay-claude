@@ -1,6 +1,6 @@
 {
   "name": "interval-claude",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "错峰激活多个 Claude Code 帐号，最大化日使用额度",
   "type": "module",
   "bin": {
