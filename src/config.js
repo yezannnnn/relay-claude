@@ -13,10 +13,26 @@ import os from 'node:os';
 const DIR_NAME = '.intervalClaude';
 const CONFIG_FILE = 'config.json';
 
+const DEFAULT_SCHEDULER = Object.freeze({
+  enabled: true,
+  stagger_min: null, // null = 自动按 300/N 计算
+  sub_weights: {
+    pro: 1,
+    max_5x: 5,
+    max_20x: 20,
+    team: 10,
+    _default: 1,
+  },
+  expire_threshold_min: 3,
+  auto_switch: true,
+  notify: true,
+});
+
 const DEFAULT_CONFIG = Object.freeze({
   interval_minutes: 100,
   ping_prompt: 'hi',
   accounts: [],
+  scheduler: DEFAULT_SCHEDULER,
 });
 
 /**
@@ -44,6 +60,7 @@ function defaultConfig() {
     interval_minutes: DEFAULT_CONFIG.interval_minutes,
     ping_prompt: DEFAULT_CONFIG.ping_prompt,
     accounts: [],
+    scheduler: { ...DEFAULT_SCHEDULER, sub_weights: { ...DEFAULT_SCHEDULER.sub_weights } },
   };
 }
 
@@ -88,6 +105,19 @@ export async function loadConfig() {
       })
     : [];
 
+  // 合并 scheduler 配置：用户配置覆盖默认值
+  const userScheduler = parsed.scheduler && typeof parsed.scheduler === 'object'
+    ? parsed.scheduler
+    : {};
+  const mergedScheduler = {
+    ...DEFAULT_SCHEDULER,
+    ...userScheduler,
+    sub_weights: {
+      ...DEFAULT_SCHEDULER.sub_weights,
+      ...(userScheduler.sub_weights ?? {}),
+    },
+  };
+
   // 补全缺失字段，保持向前兼容
   return {
     interval_minutes:
@@ -99,6 +129,7 @@ export async function loadConfig() {
         ? parsed.ping_prompt
         : DEFAULT_CONFIG.ping_prompt,
     accounts: migratedAccounts,
+    scheduler: mergedScheduler,
   };
 }
 

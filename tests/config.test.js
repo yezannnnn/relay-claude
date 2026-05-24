@@ -45,11 +45,15 @@ test('saveConfig + loadConfig: 保存后能再读出来', async () => {
 
   const reloaded = await loadConfig();
   // v0.1 token 字段在 loadConfig 时被迁移为 legacy_token
-  assert.deepEqual(reloaded, {
-    interval_minutes: 90,
-    ping_prompt: 'hello',
-    accounts: [{ name: 'a', legacy_token: 'sk-ant-1', offset_minutes: 0 }],
-  });
+  assert.equal(reloaded.interval_minutes, 90);
+  assert.equal(reloaded.ping_prompt, 'hello');
+  assert.deepEqual(reloaded.accounts, [
+    { name: 'a', legacy_token: 'sk-ant-1', offset_minutes: 0 },
+  ]);
+  // v0.3 新增：loadConfig 注入 scheduler 默认值
+  assert.ok(reloaded.scheduler);
+  assert.equal(reloaded.scheduler.enabled, true);
+  assert.equal(reloaded.scheduler.sub_weights.pro, 1);
 });
 
 test('saveConfig: 目录不存在时自动创建', async () => {
