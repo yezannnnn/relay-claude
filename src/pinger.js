@@ -73,6 +73,7 @@ export async function pingAccount(account, prompt, options = {}) {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const claudeBin = options.claudeBin ?? DEFAULT_CLAUDE_BIN;
   const spawnFn = options.spawnFn ?? defaultSpawn;
+  const model = options.model ?? 'haiku';  // 默认用 haiku 最省额度
 
   // 关键：用对象展开构造新 env，不修改全局 process.env
   const childEnv = {
@@ -80,7 +81,7 @@ export async function pingAccount(account, prompt, options = {}) {
     CLAUDE_CODE_OAUTH_TOKEN: token,
   };
 
-  const args = ['-p', effectivePrompt];
+  const args = ['-p', effectivePrompt, '--model', model];
   const startedAt = Date.now();
 
   return new Promise((resolve) => {
@@ -222,6 +223,7 @@ export async function pingWithRetry(account, prompt, options = {}) {
     timeoutMs: options.timeoutMs,
     claudeBin: options.claudeBin,
     spawnFn: options.spawnFn,
+    model: options.model,
   };
 
   const results = [];

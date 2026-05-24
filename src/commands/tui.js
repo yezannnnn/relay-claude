@@ -18,7 +18,8 @@ import { health as healthScore } from '../scheduler.js';
 import useCommand from './use.js';
 import { runPing } from './ping-cmd.js';
 
-const REFRESH_INTERVAL_MS = 10000;
+const REFRESH_INTERVAL_MS = 10_000;
+const API_REFRESH_INTERVAL_MS = 60_000;
 
 // ANSI 颜色
 const C = {
@@ -42,10 +43,13 @@ export default async function tuiCommand() {
     process.stdin.setEncoding('utf8');
   }
 
-  let cursor = 0;       // 当前选中行索引
-  let status = '';      // 底部状态消息（操作反馈）
+  let cursor = 0;            // 当前选中行索引
+  let status = '';           // 底部状态消息（操作反馈）
   let busy = false;
+  let apiRefreshing = false; // 防止 API 刷新并发
+  let lastApiRefresh = null; // 上次 API 刷新时间
   let timer = null;
+  let apiTimer = null;
   let quitting = false;
   let configCache = null;
   let daemonCache = null;
@@ -55,6 +59,7 @@ export default async function tuiCommand() {
     if (quitting) return;
     quitting = true;
     if (timer) clearInterval(timer);
+    if (apiTimer) clearInterval(apiTimer);
     process.stdout.write('\x1b[?25h\n');
     if (process.stdin.isTTY) process.stdin.setRawMode(false);
     process.exit(0);
@@ -81,8 +86,10 @@ export default async function tuiCommand() {
     else if (cursor < 0) cursor = 0;
   }
 
-  async function refreshFromAPI() {
-    busy = true;
+  async function refreshFromAPI(fromUser = false) {
+    if (apiRefreshing) return;
+    apiRefreshing = true;
+    if (fromUser) busy = true;
     status = '正在刷新所有帐号 usage...';
     render();
     let config = await loadConfig();
@@ -102,8 +109,10 @@ export default async function tuiCommand() {
       }
     }
     await saveConfig(config);
-    status = `刷新完成: ${okCount} OK${failCount ? `, ${failCount} 失败` : ''}`;
-    busy = false;
+    lastApiRefresh = new Date();
+    status = `已刷新 ${lastApiRefresh.toLocaleTimeString('zh-CN', { hour12: false })} — ${okCount} OK${failCount ? `, ${failCount} 失败` : ''}`;
+    apiRefreshing = false;
+    if (fromUser) busy = false;
     await refreshLocal();
     render();
   }
@@ -182,7 +191,7 @@ export default async function tuiCommand() {
     // Enter
     if (k === '\r' || k === '\n') return actionSwitch();
     if (k === 'p') return actionPing();
-    if (k === 'r') return refreshFromAPI();
+    if (k === 'r') return refreshFromAPI(true);
   });
 
   function render() {
@@ -195,7 +204,12 @@ export default async function tuiCommand() {
     const daemon = daemonCache?.running
       ? `${C.green}●${C.reset} 运行中 (uptime ${daemonCache.uptime ?? '-'})`
       : `${C.red}●${C.reset} 未运行`;
-    lines.push(`${C.bold}intervalClaude${C.reset}    ${C.gray}${now}${C.reset}    Daemon: ${daemon}    ${configCache.accounts.length} accounts`);
+    const refreshTag = apiRefreshing
+      ? `${C.yellow}⟳ 刷新中...${C.reset}`
+      : lastApiRefresh
+        ? `${C.dim}上次刷新: ${lastApiRefresh.toLocaleTimeString('zh-CN', { hour12: false })}${C.reset}`
+        : `${C.dim}自动刷新: 1m${C.reset}`;
+    lines.push(`${C.bold}intervalClaude${C.reset}    ${C.gray}${now}${C.reset}    ${refreshTag}    Daemon: ${daemon}    ${configCache.accounts.length} accounts`);
     lines.push('');
 
     // 计算每个帐号的健康度（缓存到 a._health 供表格使用）
@@ -272,6 +286,12 @@ export default async function tuiCommand() {
       } else {
         lines.push(row);
       }
+      // 邮箱副行（dim，仅在有 email 时显示）
+      const email = a.credentials?.email;
+      if (email) {
+        const emailLine = `  ${C.dim}${C.gray}${email}${C.reset}`;
+        lines.push(i === cursor ? `${C.inv}  ${email}${C.reset}` : emailLine);
+      }
     });
 
     lines.push('');
@@ -289,7 +309,7 @@ export default async function tuiCommand() {
       `${C.bold}↑↓${C.reset} 选择`,
       `${C.bold}Enter${C.reset} 切换`,
       `${C.bold}p${C.reset} ping`,
-      `${C.bold}r${C.reset} 刷新`,
+      `${C.bold}r${C.reset} 立即刷新`,
       `${C.bold}q${C.reset} 退出`,
     ];
     lines.push(`${C.dim}  ${helpItems.join('   ')}${C.reset}`);
@@ -299,14 +319,22 @@ export default async function tuiCommand() {
     process.stdout.write(lines.map((l) => l + '\x1b[K').join('\n') + '\x1b[J');
   }
 
-  // 启动
+  // 启动：先本地渲染，然后立刻做一次 API 刷新拿最新数据
   await refreshLocal();
   render();
+  refreshFromAPI(); // 首次启动不 await，后台刷新
+
   timer = setInterval(async () => {
     if (busy) return;
     await refreshLocal();
     render();
   }, REFRESH_INTERVAL_MS);
+
+  // 每 60s 自动刷新所有帐号 usage（不阻塞键盘）
+  apiTimer = setInterval(async () => {
+    if (busy || apiRefreshing || quitting) return;
+    await refreshFromAPI();
+  }, API_REFRESH_INTERVAL_MS);
 
   // 屏幕大小变化时立刻重画
   process.stdout.on('resize', () => {

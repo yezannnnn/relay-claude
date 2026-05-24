@@ -1,191 +1,223 @@
-# intervalClaude
+# claude-relay
 
-错峰激活多个 Claude Code 帐号，最大化每日可用时长。
+> Stagger multiple Claude Code accounts to extend your daily quota beyond the 5-hour limit.
 
-每个 Claude 帐号有 5 小时滚动重置窗口。如果你有 3 个帐号，按 100 分钟错峰激活，可以让三个 5h 窗口拼接覆盖 8-9 小时工作日。
+Each Claude account has a **5-hour rolling usage window**. With 3 accounts staggered 100 minutes apart, you get overlapping windows that cover an 8–9 hour workday. interval-claude automates this — pinging accounts to open their windows at the right time, scoring account health in real-time, and switching Keychain credentials the moment your active account runs out.
 
-> **v0.3 新增**：完全动态调度 — daemon 实时评估帐号健康度，按 sub 等级 + 剩余 usage + 窗口剩余时间打分，自动 ping 维护窗口重叠，主帐号用满自动切换。macOS 系统通知。Max 5x = Pro × 5，Max 20x = Pro × 20。
->
-> v0.2: OAuth 凭证 + 实时 usage 查询 + `use` 全局切换 + TUI 仪表盘。
+**macOS only** (depends on Keychain). Linux/Windows planned.
 
-## 工作原理
+---
+
+## How It Works
 
 ```
-帐号 A 窗口  [09:00 ━━━━━━━━━━━━━━━━━ 14:00]
-帐号 B 窗口         [10:40 ━━━━━━━━━━━━━━━━━ 15:40]
-帐号 C 窗口                [12:20 ━━━━━━━━━━━━━━━━━ 17:20]
-                  ↑          ↑          ↑
-              你正常工作    A 用完切 B    B 用完切 C
+Account A  [09:00 ━━━━━━━━━━━━━━━ 14:00]
+Account B        [10:40 ━━━━━━━━━━━━━━━ 15:40]
+Account C              [12:20 ━━━━━━━━━━━━━━━ 17:20]
+                    ↑            ↑            ↑
+               you work     A depleted    B depleted
+                             → switch B   → switch C
 ```
 
-守护进程定时为每个帐号发一条 `claude -p "hi"`，让各自的 5h 窗口开始计时。
-你主帐号额度用完时跑 `interval-claude use <name>` 瞬间切换到剩余时间最多的帐号。
+The daemon sends `claude -p "hi" --model haiku` (cheapest possible) to each account at the scheduled offset, triggering its 5-hour window. When the active account's usage hits 100% (or its window expires), the daemon picks the healthiest available account and switches the global Keychain credential — every terminal's `claude` command updates instantly.
 
-## 安装
+---
+
+## Installation
+
+### npm (recommended)
 
 ```bash
-git clone https://github.com/yezannnn/intervalClaude.git
-cd intervalClaude
-npm link            # 注册全局命令 interval-claude
+npm install -g claude-relay
 ```
 
-要求：
-- Node.js 18+
-- macOS（v0.2 仅支持，依赖 Keychain）
-- 零运行时依赖
-
-## 快速开始
-
-### 1. 添加第一个帐号
+### From source
 
 ```bash
-# 登录帐号 A
-claude /login
+git clone https://github.com/yezannnn/claude-relay.git
+cd claude-relay
+npm link
+```
 
-# 让 intervalClaude 捕获凭证
+**Requirements:** Node.js ≥ 18, macOS, `curl` in PATH.  
+No runtime dependencies — only Node.js built-ins.
+
+---
+
+## Quick Start
+
+### 1. Add accounts
+
+```bash
+# Log in to account A first
+claude /logout && claude /login
+
 interval-claude add primary
-# 提示"请先运行 claude /login..."，按回车继续
-# 自动读 Keychain，验证 + 显示订阅类型 + 5h 使用率
+# → reads Keychain, verifies token, shows subscription + usage
 ```
 
-### 2. 添加更多帐号
+Repeat for each account (log out, log in, then `add`):
 
 ```bash
-# 登出 A，登录 B
-claude /logout
-claude /login
-
+claude /logout && claude /login
 interval-claude add secondary
 
-# 重复添加 tertiary…
+claude /logout && claude /login
+interval-claude add tertiary
 ```
 
-或者**交互式批量**：
+Or use interactive batch mode:
 
 ```bash
-interval-claude add
-# 提示"准备好登录第 1 个？" → Y → 输入名字 → 自动读取
-# 然后提示第 2 个…
+interval-claude add    # prompts for each account one by one
 ```
 
-### 3. 查看所有帐号
+### 2. Check status
 
 ```bash
-interval-claude list           # 用缓存的 usage（快）
-interval-claude list --refresh # 实时查询 API
+interval-claude list           # cached usage (instant)
+interval-claude list --refresh # live API query
 ```
 
-输出示例：
 ```
-NAME       SUB   5H USE  RESETS    7D USE  STATUS
-─────────  ────  ──────  ────────  ──────  ──────
-* primary  Pro    57%    in 4h32m   14%    🟢
-  secondary Pro    0%     -          0%    ⚪
-  tertiary Max5x  23%    in 2h11m    5%    🟢
-
-interval_minutes=100  共 3 个帐号
+NAME       SUB     5H USAGE  RESETS     7D    STATUS
+─────────  ──────  ────────  ─────────  ────  ──────
+* primary  Max5x    57%      in 4h32m   14%   🟢 active
+  secondary Pro      0%      —           0%   ⚪ dormant
+  tertiary  Pro     23%      in 2h11m    5%   🔵 backup
 ```
 
-`*` 表示当前 Keychain 活跃的帐号。
+`*` marks the account currently in Keychain (active for all terminals).
 
-### 4. 启动守护进程
+### 3. Start the daemon
 
 ```bash
 interval-claude start
-# 检测到 3 个帐号: primary, secondary, tertiary
-# 是否开启错峰激活? [Y/n]: Y
-# ✅ 错峰安排（5h ÷ 3 = 100 分钟间隔）:
-#    primary  → 立即 ping
-#    secondary → 100 分钟后 ping
-#    tertiary → 200 分钟后 ping
-# ✅ 守护进程已启动 (pid=12345)
+# ✅ Daemon started (pid=12345)
+# Logs → ~/.intervalClaude/daemon.log
 ```
 
-守护进程会：
-- 按错峰安排自动 ping 每个帐号触发 5h 窗口
-- 每次 ping 后查询并缓存 usage
-- 自动续期临期 token
-
-### 5. 切换帐号
-
-主帐号额度用完时：
-
-```bash
-interval-claude use secondary
-# 备份当前 Keychain 到帐号: primary
-# ✅ 已切换到 secondary
-#    订阅: Pro
-#    5h 使用: 12% (剩余 88%)
-# 所有终端的 claude 命令立即生效
-```
-
-或自动选剩余时间最多的：
-
-```bash
-eval "$(interval-claude export-env)"  # 仅当前 shell
-```
-
-### 6. 实时仪表盘
+### 4. Live dashboard
 
 ```bash
 interval-claude tui
 ```
 
 ```
-┌─ intervalClaude · 守护进程运行中 (uptime 1h 23m) ─────┐
-│                                                       │
-│  NAME         SUB      5H USE         7D USE  NEXT    │
-│  ────────     ────     ───────────    ──────  ──────  │
-│  * primary    Pro      ███▌░ 57%      14%     已过    │
-│    secondary  Pro      ░░░░░ 0%       0%      1h23m   │
-│    tertiary   Max5x    █▌░░░ 23%      5%      3h10m   │
-│                                                       │
-│  当前 Keychain: primary                               │
-│                                                       │
-│  [r] 刷新  [u] 切换  [p] ping  [q] 退出              │
-└───────────────────────────────────────────────────────┘
+intervalClaude    18:42:57    上次刷新: 18:42:00    Daemon: ● running (uptime 2h 14m)
+
+┌─ 调度策略 ──────────────────────────────────────────────
+│ 活跃: primary (Max5x) ← health 187
+│ 下一切换候选: secondary (Pro) ← health 231
+│ 阈值: 切换=100%   预ping=25% 或 75min   错峰间隔=75min (300÷4)
+└────────────────────────────────────────────────────────
+
+  NAME          SUB      5H USAGE               7D    NEXT     RESETS    H分   状态
+  primary       Max5x    ████████▌░░░░░░░░░░░  57%    14%    —        2h18m  187   🟢 活跃
+  secondary     Pro      ░░░░░░░░░░░░░░░░░░░░   0%     0%    ping@23m  —       300   ⚪ 待激活
+  tertiary      Pro      ████▌░░░░░░░░░░░░░░░  23%     5%    —        2h11m   178   🔵 备用
+
+↑↓ 选择   Enter 切换   p ping   r 立即刷新   q 退出
 ```
 
-按键：
-- `r` — 强制 API 刷新所有帐号 usage
-- `u` — 切换帐号（弹出选择菜单）
-- `p` — 手动 ping
-- `s` — 启动 daemon（如未运行）
-- `q` — 退出
+Dashboard auto-refreshes usage from API every **60 seconds**. Press `r` to force an immediate refresh.
 
-### 7. 停止守护进程
+### 5. Manual account switch
+
+```bash
+interval-claude use secondary
+# ✅ Switched to secondary (Pro, 88% remaining, resets in 4h32m)
+# Takes effect in all terminals immediately.
+```
+
+### 6. Stop the daemon
 
 ```bash
 interval-claude stop
 ```
 
-## 命令清单
+---
 
-### 帐号管理
+## Scheduling Strategy (v0.3)
 
-| 命令 | 说明 |
-|------|------|
-| `add [name] [--offset N]` | 从 Keychain 捕获凭证；无参数 = 批量 |
-| `list [--refresh]` | 列出帐号 + 订阅 + usage |
-| `remove <name> [--yes]` | 删除帐号 |
-| `use <name>` | 全局切换 Keychain（所有终端立即生效） |
-| `export-env [name]` | 输出 shell export 命令（仅当前 shell） |
+### Health Score
 
-### 守护进程
+Every account is assigned a health score each cycle:
 
-| 命令 | 说明 |
-|------|------|
-| `start` | 启动（交互式询问错峰） |
-| `stop` | 停止 |
-| `status` | 查看状态 |
-| `ping <name>` | 手动触发 ping |
-| `tui` | 实时多帐号仪表盘 |
+| Account state | Health formula |
+|---------------|----------------|
+| Dormant (window not started) | `weight × 1.0 × 300` |
+| Window expired | `weight × 1.0 × 300` |
+| Active window, usage < 100% | `weight × (1 − usage) × remaining_minutes` |
+| Usage ≥ 100% | `0` |
+| Window expires in < 3 min | `0` |
 
-## 配置文件
+**Subscription weights** (configurable):
 
-存储位置：`~/.intervalClaude/`（可通过 `INTERVAL_CLAUDE_HOME` 覆盖）
+| Plan | Weight |
+|------|--------|
+| Pro | 1× |
+| Max 5x | 5× |
+| Max 20x | 20× |
+| Team | 10× |
 
-`config.json` (v0.2 格式)：
+A Max 5x account at 50% usage is scored as more valuable than a fresh Pro account.
+
+### When the Daemon Acts
+
+**Force switch** — triggered when the active account:
+- usage ≥ 100%
+- 5-hour window expired
+- hit rate-limit in the last 10 minutes
+- no account found in Keychain
+
+Action: switch to the highest-health alternative. If that account's window hasn't started → `PING` first, then `USE`.
+
+**Pre-ping** — triggered when the active account is healthy but:
+- elapsed time since window start ≥ `300min ÷ N` (stagger interval), OR
+- active usage ≥ `1 ÷ N` (proportional threshold)
+
+Action: `PING` the next dormant backup account to open its window.
+
+With 4 accounts, the stagger interval is `300 ÷ 4 = 75 minutes` and the usage threshold is `25%`. The daemon pre-pings a backup after the active account has been running for 75 minutes or has used 25% of its quota — whichever comes first.
+
+### Safety Guards
+
+- **Unknown Keychain token**: if the Keychain holds a token that doesn't belong to any configured account (e.g. you manually logged into a personal account), the daemon pauses all scheduling and logs the event. It will not overwrite your manual login.
+- **Ping model**: all pings use `--model haiku` (cheapest model) to minimize quota impact.
+- **Token auto-renewal**: tokens expiring in < 30 minutes are renewed proactively to prevent silent expiry.
+
+---
+
+## Commands
+
+### Account management
+
+| Command | Description |
+|---------|-------------|
+| `add [name] [--offset N]` | Capture credentials from Keychain; no args = batch |
+| `list [--refresh]` | List accounts with subscription, usage, health |
+| `remove <name> [--yes]` | Remove an account |
+| `use <name>` | Switch global Keychain credential (all terminals) |
+
+### Daemon
+
+| Command | Description |
+|---------|-------------|
+| `start [--no-tui]` | Start background daemon |
+| `stop` | Stop daemon (SIGTERM → SIGKILL after 5s) |
+| `status` | Show running state, PID, uptime |
+| `ping <name>` | Manually trigger one ping |
+| `tui` / `watch` | Live dashboard |
+
+---
+
+## Configuration
+
+Stored in `~/.intervalClaude/` (override with `INTERVAL_CLAUDE_HOME`).
+
+### `config.json`
+
 ```json
 {
   "interval_minutes": 100,
@@ -198,57 +230,93 @@ interval-claude stop
         "accessToken": "sk-ant-oat01-...",
         "refreshToken": "sk-ant-ort01-...",
         "expiresAt": 1779573809608,
-        "scopes": ["user:profile", "user:inference", ...],
-        "subscriptionType": "pro"
+        "scopes": ["user:profile", "user:inference"],
+        "subscriptionType": "max_5x",
+        "email": "you@example.com"
       },
       "last_usage": {
-        "five_hour": {"utilization": 0.57, "resets_at": "2026-05-23T19:00:00Z"},
-        "seven_day": {"utilization": 0.14, "resets_at": "2026-05-28T15:00:00Z"}
+        "five_hour": { "utilization": 0.57, "resets_at": "2026-05-24T11:00:00Z" },
+        "seven_day":  { "utilization": 0.14, "resets_at": "2026-05-29T08:00:00Z" }
       }
     }
-  ]
+  ],
+  "scheduler": {
+    "enabled": true,
+    "stagger_min": 75,
+    "expire_threshold_min": 3,
+    "notify": true,
+    "sub_weights": {
+      "pro": 1,
+      "max_5x": 5,
+      "max_20x": 20,
+      "team": 10
+    }
+  }
 }
 ```
 
-文件权限 0o600（仅本人可读写）。**不要提交到 git**。
+File permissions: `0o600` (owner read/write only). **Never commit this file.**
 
-## v0.1 → v0.2 升级
+### `state.json` (managed by daemon)
 
-v0.1 用 `claude setup-token` 生成的长效 token 没有 `user:profile` scope，无法查 usage。
+```json
+{
+  "daemon_pid": 12345,
+  "started_at": "2026-05-24T10:00:00+08:00",
+  "last_pings": {
+    "primary":   "2026-05-24T10:00:15+08:00",
+    "secondary": "2026-05-24T11:15:22+08:00",
+    "tertiary":  null
+  }
+}
+```
 
-升级方式：
-1. 安装 v0.2
-2. 跑 `interval-claude list` — 旧帐号会显示 SUB="v0.1"
-3. 对每个帐号：
-   ```bash
-   claude /logout
-   claude /login        # 登录该帐号
-   interval-claude remove <name> --yes
-   interval-claude add <name>
-   ```
+---
 
-## 跨平台
+## Daemon Log
 
-| 平台 | 状态 |
-|------|------|
-| macOS | ✅ v0.2 完整支持（Keychain） |
-| Linux | ⏳ v0.3 计划（读 `~/.config/claude/credentials.json`） |
-| Windows | ⏳ v0.3 计划（Credential Manager） |
+Logs are written to `~/.intervalClaude/daemon.log` with UTC+8 timestamps:
 
-## 技术细节
+```
+[2026-05-24T18:42:57+08:00] daemon: 主循环启动 (v0.3 动态调度)
+[2026-05-24T18:42:58+08:00] schedule: PING secondary (health=300)
+[2026-05-24T18:43:25+08:00] PING secondary: OK
+[2026-05-24T19:57:13+08:00] schedule: USE tertiary (health=278)
+[2026-05-24T19:57:13+08:00] daemon: Keychain 属于未知帐号，暂停调度
+```
 
-- **零运行时依赖**：只用 Node.js 标准库 + `curl` 命令
-- **Usage API**：`https://api.anthropic.com/api/oauth/usage` (非官方但稳定)
-- **Token refresh**：`POST /api/oauth/token` (client_id 与 claude CLI 一致)
-- **代理支持**：通过 `curl` 自动读 `https_proxy` 环境变量
-- **错峰算法**：`offset_minutes = i * (300 / N)` 自动按帐号数分配
+---
 
-## 安全提醒
+## Upgrading from v0.1
 
-- `config.json` 含明文 token，**绝不要提交到公开仓库**
-- Token 泄露时立即去 https://claude.ai/settings/keys 撤销
-- 调用 Anthropic 非官方 API（`/api/oauth/usage`）有改动风险，但同样的 endpoint 被 cc-switch、claude CLI 自身使用，相对稳定
+v0.1 used `claude setup-token` long-lived tokens which lack the `user:profile` scope (no usage query). To upgrade each account:
+
+```bash
+claude /logout && claude /login   # log in to that account
+interval-claude remove <name> --yes
+interval-claude add <name>
+```
+
+---
+
+## Platform Support
+
+| Platform | Status |
+|----------|--------|
+| macOS | ✅ Full support (Keychain) |
+| Linux | ⏳ Planned — reads `~/.config/claude/credentials.json` |
+| Windows | ⏳ Planned — Credential Manager |
+
+---
+
+## Security
+
+- `config.json` contains plaintext tokens. Set permissions to `600`, never commit to a public repo.
+- If tokens are compromised, revoke them at https://claude.ai/settings/keys
+- Uses Anthropic's internal OAuth endpoints (`/api/oauth/usage`, `/api/oauth/profile`) — same endpoints used by Claude CLI itself. Not officially documented but stable.
+
+---
 
 ## License
 
-MIT
+MIT © yezannnn

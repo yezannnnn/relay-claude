@@ -7,3 +7,6 @@ node_modules/
 # Local test config
 test-config.json
 test-state.json
+
+# Claude Code local settings
+.claude/

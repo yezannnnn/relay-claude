@@ -1,14 +1,16 @@
 {
-  "name": "interval-claude",
+  "name": "claude-relay",
   "version": "0.3.0",
-  "description": "错峰激活多个 Claude Code 帐号，最大化日使用额度",
+  "description": "Stagger multiple Claude Code accounts to extend your daily quota beyond the 5-hour limit",
   "type": "module",
   "bin": {
+    "claude-relay": "./bin/interval-claude",
     "interval-claude": "./bin/interval-claude"
   },
   "main": "./src/cli.js",
   "scripts": {
     "test": "node --test tests/*.test.js",
+    "prepublishOnly": "npm test",
     "start": "node bin/interval-claude"
   },
   "engines": {
@@ -17,15 +19,29 @@
   "files": [
     "bin/",
     "src/",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "keywords": [
     "claude",
     "claude-code",
+    "anthropic",
     "rate-limit",
+    "quota",
     "rotation",
-    "cli"
+    "multi-account",
+    "cli",
+    "daemon",
+    "tui"
   ],
   "license": "MIT",
-  "author": "yezannnnn"
+  "author": "yezannnnn",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yezannnnn/claude-relay.git"
+  },
+  "homepage": "https://github.com/yezannnnn/claude-relay#readme",
+  "bugs": {
+    "url": "https://github.com/yezannnnn/claude-relay/issues"
+  }
 }

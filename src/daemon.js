@@ -26,7 +26,7 @@ import {
 } from './state.js';
 import { dueAccounts, schedule, ACTION_PING, ACTION_USE, health } from './scheduler.js';
 import { pingWithRetry } from './pinger.js';
-import { appendLog } from './logger.js';
+import { appendLog, toCST } from './logger.js';
 import { queryUsageWithRefresh, refreshAccessToken, isExpiringSoon } from './oauth.js';
 import { sendNotification } from './notifier.js';
 import { isKeychainSupported, readKeychainRaw, parseClaudeCredentials } from './keychain.js';
@@ -129,7 +129,7 @@ export async function runDaemon(options = {}) {
     for (const a of config.accounts) {
       if (!a.credentials) continue;
       if (!isExpiringSoon(a.credentials, 30 * 60 * 1000)) continue; // 30 min 预警
-      const tsIso = nowFn().toISOString();
+      const tsIso = toCST(nowFn());
       logFn(`[${tsIso}] proactive refresh: ${a.name} (expiring in <30min)`);
       try {
         const newCreds = await refreshAccessToken(a.credentials);
@@ -137,14 +137,17 @@ export async function runDaemon(options = {}) {
         const updated = setCredentials(config, a.name, newCreds);
         await saveConfig(updated);
         config = updated;
-        logFn(`[${tsIso}] proactive refresh ${a.name}: OK (next exp ${new Date(newCreds.expiresAt).toISOString()})`);
+        logFn(`[${tsIso}] proactive refresh ${a.name}: OK (next exp ${toCST(new Date(newCreds.expiresAt))})`);
       } catch (err) {
         logFn(`[${tsIso}] proactive refresh ${a.name}: FAIL ${err?.message ?? err}`);
       }
     }
 
     // 识别当前活跃帐号（通过 Keychain）
+    // 如果 Keychain 里的 token 不属于任何已配置帐号，说明用户手动切换到了
+    // config 外的帐号（如自己的帐号），此时 pause 调度，避免强行覆盖。
     let active = null;
+    let keychainUnknown = false;
     if (isKeychainSupported()) {
       try {
         const raw = readKeychainRaw();
@@ -153,10 +156,21 @@ export async function runDaemon(options = {}) {
           active = config.accounts.find(
             (a) => a.credentials?.accessToken === creds.accessToken,
           );
+          if (!active && creds.accessToken) {
+            keychainUnknown = true;
+          }
         }
       } catch {
         /* ignore */
       }
+    }
+
+    // Keychain 是外部未知帐号 → 暂停调度，不抢覆盖
+    if (keychainUnknown) {
+      const tsIso = toCST(nowFn());
+      logFn(`[${tsIso}] daemon: Keychain 属于未知帐号，暂停调度（避免覆盖手动登录）`);
+      await interruptibleSleep(checkIntervalMs, shouldStop);
+      continue;
     }
 
     const nowMs = nowFn().getTime();
@@ -197,7 +211,7 @@ export async function runDaemon(options = {}) {
     for (const act of actions) {
       if (shouldStop()) break;
       const target = act.account;
-      const tsIso = nowFn().toISOString();
+      const tsIso = toCST(nowFn());
       const h = Math.round(health(target, config, nowMs));
 
       if (act.type === ACTION_PING) {

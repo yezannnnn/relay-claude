@@ -6,7 +6,7 @@
 
 import { loadConfig, saveConfig, addAccount, setLastUsage, setCredentials } from '../config.js';
 import { readCredentials, isKeychainSupported } from '../keychain.js';
-import { queryUsage } from '../oauth.js';
+import { queryUsage, queryProfile } from '../oauth.js';
 import { prompt as ask, closePrompt as close } from './prompt.js';
 
 export default async function addCommand(args) {
@@ -52,12 +52,17 @@ async function captureOne(name, { offsetMinutes }) {
     process.exit(1);
   }
 
-  // 验证 + 拉一次 usage
+  // 验证 + 拉一次 usage + 拉邮箱
   let usage = null;
   try {
     usage = await queryUsage(credentials.accessToken);
   } catch (err) {
     console.warn(`⚠️  usage 查询失败 (${err.message})。继续保存帐号但无 usage 数据。`);
+  }
+
+  const profile = await queryProfile(credentials.accessToken);
+  if (profile?.email) {
+    credentials = { ...credentials, email: profile.email };
   }
 
   let newConfig;
@@ -77,6 +82,7 @@ async function captureOne(name, { offsetMinutes }) {
   await saveConfig(newConfig);
 
   console.log(`✅ ${isUpdate ? '已更新' : '已添加'} ${name}`);
+  if (credentials.email) console.log(`   邮箱: ${credentials.email}`);
   console.log(`   订阅: ${credentials.subscriptionType || '未知'}`);
   if (usage?.five_hour) {
     const pct = Math.round(usage.five_hour.utilization * 100);

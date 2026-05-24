@@ -10,6 +10,12 @@ import { getConfigDir } from './config.js';
 
 const LOG_FILE = 'daemon.log';
 
+/** 把 Date 格式化为东八区时间字符串，如 2026-05-24T18:42:57+08:00 */
+export function toCST(date) {
+  const cstMs = date.getTime() + 8 * 3_600_000;
+  return new Date(cstMs).toISOString().replace('Z', '+08:00');
+}
+
 /** daemon.log 完整路径 */
 export function getLogPath() {
   return path.join(getConfigDir(), LOG_FILE);
@@ -17,7 +23,7 @@ export function getLogPath() {
 
 /**
  * 追加一行日志到 daemon.log。
- * 自动加 ISO 时间戳前缀和换行。
+ * 自动加东八区时间戳前缀和换行。
  * 失败时静默（日志写入不应让主流程崩溃）。
  *
  * @param {string} message - 日志正文
@@ -26,7 +32,7 @@ export function appendLog(message) {
   try {
     const dir = getConfigDir();
     mkdirSync(dir, { recursive: true, mode: 0o700 });
-    const line = `[${new Date().toISOString()}] ${message}\n`;
+    const line = `[${toCST(new Date())}] ${message}\n`;
     appendFileSync(getLogPath(), line, { encoding: 'utf8', mode: 0o600 });
   } catch {
     // 日志写入失败不应阻塞主流程

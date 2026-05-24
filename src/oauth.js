@@ -14,6 +14,7 @@ import { spawn } from 'node:child_process';
 
 export const CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
 export const USAGE_ENDPOINT = 'https://api.anthropic.com/api/oauth/usage';
+export const PROFILE_ENDPOINT = 'https://api.anthropic.com/api/oauth/profile';
 // Refresh endpoint 不在 api.anthropic.com，在 platform.claude.com
 // 通过 strings claude CLI 二进制确认: "https://platform.claude.com/v1/oauth/token"
 export const TOKEN_ENDPOINT = 'https://platform.claude.com/v1/oauth/token';
@@ -144,6 +145,31 @@ export async function queryUsage(accessToken, options = {}) {
 function normalizeUtilization(v) {
   if (v == null) return null;
   return v > 1 ? v / 100 : v;
+}
+
+/** 查询帐号邮箱 / 用户名（用于 TUI 展示）。返回 { email, fullName } 或 null。 */
+export async function queryProfile(accessToken, options = {}) {
+  const requestFn = options.requestFn ?? curlRequest;
+  try {
+    const res = await requestFn({
+      url: PROFILE_ENDPOINT,
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'anthropic-beta': OAUTH_BETA_HEADER,
+        Accept: 'application/json',
+        'User-Agent': USER_AGENT,
+      },
+    });
+    if (!res.ok) return null;
+    const data = JSON.parse(res.body);
+    return {
+      email: data.account?.email ?? null,
+      fullName: data.account?.full_name ?? null,
+    };
+  } catch {
+    return null;
+  }
 }
 
 export async function queryUsageWithRefresh(credentials, options = {}) {
