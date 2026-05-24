@@ -27,7 +27,7 @@ import {
 import { dueAccounts, schedule, ACTION_PING, ACTION_USE, health } from './scheduler.js';
 import { pingWithRetry } from './pinger.js';
 import { appendLog } from './logger.js';
-import { queryUsageWithRefresh } from './oauth.js';
+import { queryUsageWithRefresh, refreshAccessToken, isExpiringSoon } from './oauth.js';
 import { sendNotification } from './notifier.js';
 import { isKeychainSupported, readKeychainRaw, parseClaudeCredentials } from './keychain.js';
 
@@ -122,6 +122,25 @@ export async function runDaemon(options = {}) {
     for (const a of config.accounts) {
       const ts = limitReachedAt.get(a.name);
       if (ts) a.limit_reached_at = ts;
+    }
+
+    // v0.3 新增：主动续期临期 token（不依赖 ping 触发）
+    // 防止用户离开期间 token 过期导致第二天要重新 /login
+    for (const a of config.accounts) {
+      if (!a.credentials) continue;
+      if (!isExpiringSoon(a.credentials, 30 * 60 * 1000)) continue; // 30 min 预警
+      const tsIso = nowFn().toISOString();
+      logFn(`[${tsIso}] proactive refresh: ${a.name} (expiring in <30min)`);
+      try {
+        const newCreds = await refreshAccessToken(a.credentials);
+        const { setCredentials, saveConfig } = await import('./config.js');
+        const updated = setCredentials(config, a.name, newCreds);
+        await saveConfig(updated);
+        config = updated;
+        logFn(`[${tsIso}] proactive refresh ${a.name}: OK (next exp ${new Date(newCreds.expiresAt).toISOString()})`);
+      } catch (err) {
+        logFn(`[${tsIso}] proactive refresh ${a.name}: FAIL ${err?.message ?? err}`);
+      }
     }
 
     // 识别当前活跃帐号（通过 Keychain）

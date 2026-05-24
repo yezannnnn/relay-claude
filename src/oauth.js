@@ -14,7 +14,9 @@ import { spawn } from 'node:child_process';
 
 export const CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
 export const USAGE_ENDPOINT = 'https://api.anthropic.com/api/oauth/usage';
-export const TOKEN_ENDPOINT = 'https://api.anthropic.com/api/oauth/token';
+// Refresh endpoint 不在 api.anthropic.com，在 platform.claude.com
+// 通过 strings claude CLI 二进制确认: "https://platform.claude.com/v1/oauth/token"
+export const TOKEN_ENDPOINT = 'https://platform.claude.com/v1/oauth/token';
 export const OAUTH_BETA_HEADER = 'oauth-2025-04-20';
 export const USER_AGENT = 'claude-cli/2.0.0';
 
