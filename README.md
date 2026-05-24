@@ -129,8 +129,9 @@ Dashboard auto-refreshes usage from API every **60 seconds**. Press `r` to force
 ```bash
 interval-claude use secondary
 # ✅ Switched to secondary (Pro, 88% remaining, resets in 4h32m)
-# Takes effect in all terminals immediately.
 ```
+
+> ⚠️ **Restart Claude CLI after switching**: The Keychain credential is updated immediately, but any running `claude` process holds the old token in memory. Close and reopen your claude session for the new account to take effect.
 
 ### 6. Stop the daemon
 
@@ -285,18 +286,6 @@ Logs are written to `~/.intervalClaude/daemon.log` with UTC+8 timestamps:
 [2026-05-24T18:43:25+08:00] PING secondary: OK
 [2026-05-24T19:57:13+08:00] schedule: USE tertiary (health=278)
 [2026-05-24T19:57:13+08:00] daemon: Keychain 属于未知帐号，暂停调度
-```
-
----
-
-## Upgrading from v0.1
-
-v0.1 used `claude setup-token` long-lived tokens which lack the `user:profile` scope (no usage query). To upgrade each account:
-
-```bash
-claude /logout && claude /login   # log in to that account
-interval-claude remove <name> --yes
-interval-claude add <name>
 ```
 
 ---

@@ -128,8 +128,9 @@ intervalClaude    18:42:57    上次刷新: 18:42:00    Daemon: ● 运行中 (u
 ```bash
 claude-relay use secondary
 # ✅ 已切换到 secondary（Pro，剩余 88%，4h32m 后重置）
-# 所有终端立即生效
 ```
+
+> ⚠️ **切换后需重启 Claude CLI**：Keychain 凭证已更新，但正在运行的 `claude` 进程持有旧 token 的内存缓存。关闭当前终端中的 claude 会话并重新打开，新账户才会生效。
 
 ### 6. 停止守护进程
 
@@ -243,20 +244,6 @@ Max 5x 账户 50% 用量的健康度，远高于一个全新的 Pro 账户。
 ```
 
 文件权限 `0o600`（仅本人可读写）。**不要提交到 git**。
-
----
-
-## 从 v0.1 升级
-
-v0.1 使用 `claude setup-token` 生成的长效 token，缺少 `user:profile` scope，无法查询用量。
-
-升级步骤（对每个账户操作）：
-
-```bash
-claude /logout && claude /login   # 登录该账户
-claude-relay remove <name> --yes
-claude-relay add <name>
-```
 
 ---
 
