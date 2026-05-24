@@ -14,6 +14,7 @@ import { loadConfig, saveConfig, getAccessToken, setLastUsage, setCredentials } 
 import { daemonStatus } from '../daemon.js';
 import { isKeychainSupported, readKeychainRaw, parseClaudeCredentials } from '../keychain.js';
 import { queryUsageWithRefresh } from '../oauth.js';
+import { health as healthScore } from '../scheduler.js';
 import useCommand from './use.js';
 import { runPing } from './ping-cmd.js';
 
@@ -190,10 +191,49 @@ export default async function tuiCommand() {
 
     // 标题行
     const now = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+    const nowMs = Date.now();
     const daemon = daemonCache?.running
       ? `${C.green}●${C.reset} 运行中 (uptime ${daemonCache.uptime ?? '-'})`
       : `${C.red}●${C.reset} 未运行`;
     lines.push(`${C.bold}intervalClaude${C.reset}    ${C.gray}${now}${C.reset}    Daemon: ${daemon}    ${configCache.accounts.length} accounts`);
+    lines.push('');
+
+    // 计算每个帐号的健康度（缓存到 a._health 供表格使用）
+    for (const a of configCache.accounts) {
+      a._health = Math.round(healthScore(a, configCache, nowMs));
+    }
+    const activeAcc = configCache.accounts.find(
+      (a) => activeAccessToken && getAccessToken(a) === activeAccessToken,
+    );
+    const candidates = configCache.accounts
+      .filter((a) => a !== activeAcc && a._health > 0)
+      .sort((a, b) => b._health - a._health);
+    const nextCandidate = candidates[0];
+
+    const N = configCache.accounts.length;
+    const staggerMin =
+      configCache.scheduler?.stagger_min ?? (N > 0 ? Math.round(300 / N) : 0);
+
+    // 调度策略面板
+    lines.push(`${C.bold}${C.cyan}┌─ 调度策略 ${'─'.repeat(50)}${C.reset}`);
+    lines.push(
+      `${C.cyan}│${C.reset} 活跃: ${
+        activeAcc ? `${C.bold}${activeAcc.name}${C.reset} (${activeAcc.credentials?.subscriptionType ?? '-'}) ← health ${activeAcc._health}` : '(无)'
+      }`,
+    );
+    lines.push(
+      `${C.cyan}│${C.reset} 下一切换候选: ${
+        nextCandidate
+          ? `${nextCandidate.name} (${nextCandidate.credentials?.subscriptionType ?? '-'}) ← health ${nextCandidate._health}`
+          : '(无)'
+      }`,
+    );
+    lines.push(
+      `${C.cyan}│${C.reset} 阈值: 切换=100%   预ping=${
+        N > 0 ? Math.round(100 / N) : 0
+      }% 或 ${staggerMin}min   错峰间隔=${staggerMin}min (300 ÷ ${N})`,
+    );
+    lines.push(`${C.cyan}└${'─'.repeat(60)}${C.reset}`);
     lines.push('');
 
     // 表头
@@ -204,6 +244,8 @@ export default async function tuiCommand() {
       { label: '7D', width: 6 },
       { label: 'NEXT', width: 10 },
       { label: 'RESETS', width: 10 },
+      { label: 'H分', width: 8 },
+      { label: '状态', width: 14 },
     ];
     const header = '  ' + cols.map(c => padRight(c.label, c.width)).join(' ');
     lines.push(`${C.bold}${C.dim}${header}${C.reset}`);
@@ -219,10 +261,12 @@ export default async function tuiCommand() {
       const sub = padRight(a.credentials?.subscriptionType ?? (a.legacy_token ? 'v0.1' : '-'), cols[1].width);
       const usageBar = fmtUsageBar(a.last_usage?.five_hour, cols[2].width);
       const sevenD = padRight(fmtUtil(a.last_usage?.seven_day), cols[3].width);
-      const next = padRight(fmtNextPing(a, daemonCache), cols[4].width);
+      const next = padRight(fmtNextPing(a, daemonCache, configCache, activeAcc, nowMs), cols[4].width);
       const resets = padRight(fmtTimeUntil(a.last_usage?.five_hour?.resets_at), cols[5].width);
+      const hScore = padRight(String(a._health ?? 0), cols[6].width);
+      const stateLabel = padRight(fmtStateLabel(a, isActive, nowMs), cols[7].width);
 
-      const row = `${marker} ${name} ${sub} ${usageBar} ${sevenD} ${next} ${resets}`;
+      const row = `${marker} ${name} ${sub} ${usageBar} ${sevenD} ${next} ${resets} ${hScore} ${stateLabel}`;
       if (i === cursor) {
         lines.push(`${C.inv}${row}${C.reset}`);
       } else {
@@ -307,15 +351,59 @@ function fmtUtil(u) {
   return `${Math.round(u.utilization * 100)}%`;
 }
 
-function fmtNextPing(account, status) {
-  if (!status?.running || !status?.startedAt) return '-';
-  const startedMs = new Date(status.startedAt).getTime();
-  const targetMs = startedMs + (account.offset_minutes ?? 0) * 60000;
-  const diff = targetMs - Date.now();
-  if (diff <= 0) return '已过';
-  const h = Math.floor(diff / 3600000);
-  const m = Math.floor((diff % 3600000) / 60000);
-  return h > 0 ? `${h}h${m}m` : `${m}m`;
+function fmtNextPing(account, status, configCache, activeAcc, nowMs) {
+  // 活跃帐号本身不需要 ping
+  if (account === activeAcc) return '-';
+
+  // 已激活备用：窗口在跑，不需要预 ping
+  const u = account.last_usage?.five_hour;
+  if (u?.resets_at && new Date(u.resets_at).getTime() > nowMs) {
+    return '-';
+  }
+
+  // 未激活：预估下次预 ping 时间
+  if (!activeAcc || !configCache || !status?.running) return '-';
+
+  const N = configCache.accounts.length;
+  const stagger =
+    configCache.scheduler?.stagger_min ?? (N > 0 ? 300 / N : 75);
+
+  // 未激活帐号按健康度排序后的索引
+  const dormant = configCache.accounts
+    .filter(
+      (a) => a !== activeAcc && !a.last_usage?.five_hour?.resets_at,
+    )
+    .sort((a, b) => (b._health ?? 0) - (a._health ?? 0));
+  const idx = dormant.indexOf(account);
+  if (idx < 0) return '-';
+
+  // 已激活备用数（不算活跃帐号）
+  const running = configCache.accounts.filter(
+    (a) =>
+      a !== activeAcc &&
+      a.last_usage?.five_hour?.resets_at &&
+      new Date(a.last_usage.five_hour.resets_at).getTime() > nowMs &&
+      (a.last_usage?.five_hour?.utilization ?? 0) < 1.0,
+  ).length;
+
+  const targetIdx = idx + running;
+  const targetTimeMin = (targetIdx + 1) * stagger;
+
+  const startMs = status?.startedAt
+    ? new Date(status.startedAt).getTime()
+    : nowMs;
+  const elapsedMin = Math.max(0, (nowMs - startMs) / 60_000);
+  const remainMin = Math.max(0, Math.round(targetTimeMin - elapsedMin));
+  return `ping@${remainMin}m`;
+}
+
+function fmtStateLabel(account, isActive, nowMs) {
+  if (isActive) return '🟢 活跃';
+  const u = account.last_usage?.five_hour;
+  if (u && u.utilization >= 1.0) return '🔴 耗尽';
+  const resetsAtMs = u?.resets_at ? new Date(u.resets_at).getTime() : null;
+  if (resetsAtMs && resetsAtMs > nowMs) return '🔵 备用';
+  return '⚪ 待激活';
 }
 
 function fmtTimeUntil(iso) {
