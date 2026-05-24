@@ -196,7 +196,7 @@ test('pingAccount: spawn 调用使用的命令和参数正确', async () => {
   });
 
   assert.equal(calls[0].cmd, '/usr/local/bin/claude');
-  assert.deepEqual(calls[0].args, ['-p', 'custom prompt']);
+  assert.deepEqual(calls[0].args, ['-p', 'custom prompt', '--model', 'haiku']);
 });
 
 test('pingAccount: 缺失 token 抛错', async () => {

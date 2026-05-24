@@ -128,7 +128,7 @@ export function shouldPrePing(accounts, active, cfg, now = Date.now()) {
 
   const stagger = cfg?.scheduler?.stagger_min ?? FULL_WINDOW_MIN / N;
   const targetTimeMin = (nextIndex + 1) * stagger;
-  const targetUsageFrac = (nextIndex + 1) / N;
+  const prePingThreshold = cfg?.scheduler?.preping_usage_threshold ?? 0.5;
 
   // 计算主帐号已运行多久 — 优先用显式 window_start，回退反推自 resets_at
   let windowStartMs;
@@ -144,7 +144,7 @@ export function shouldPrePing(accounts, active, cfg, now = Date.now()) {
   const elapsedMin = (now - windowStartMs) / 60_000;
   const usage = currentUsage(active);
 
-  if (elapsedMin >= targetTimeMin || usage >= targetUsageFrac) {
+  if (elapsedMin >= targetTimeMin || usage >= prePingThreshold) {
     return dormant[0];
   }
   return null;

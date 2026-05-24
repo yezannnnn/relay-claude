@@ -2,6 +2,8 @@
 
 > Stagger multiple Claude Code accounts to extend your daily quota beyond the 5-hour limit.
 
+[中文文档](./README.zh-CN.md) · [Changelog](./CHANGELOG.md)
+
 Each Claude account has a **5-hour rolling usage window**. With 3 accounts staggered 100 minutes apart, you get overlapping windows that cover an 8–9 hour workday. interval-claude automates this — pinging accounts to open their windows at the right time, scoring account health in real-time, and switching Keychain credentials the moment your active account runs out.
 
 **macOS only** (depends on Keychain). Linux/Windows planned.

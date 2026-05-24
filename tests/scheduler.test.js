@@ -244,13 +244,13 @@ test('shouldPrePing: elapsed=75min 触发第 1 备用 (4 帐号, stagger=75)', (
   assert.ok(['A', 'B', 'C'].includes(result.name));
 });
 
-test('shouldPrePing: usage=25% 触发第 1 备用 (即使时间未到)', () => {
+test('shouldPrePing: usage=50% 触发第 1 备用 (即使时间未到)', () => {
   const active = mkAccount({
     name: 'M',
     sub: 'max_5x',
-    usage: 0.25,
-    resetsAt: new Date(T0 + 290 * 60 * 1000).toISOString(),
-    windowStart: T0 - 10 * 60 * 1000,
+    usage: 0.5,
+    resetsAt: new Date(T0 + 250 * 60 * 1000).toISOString(),
+    windowStart: T0 - 50 * 60 * 1000,
   });
   const accounts = [
     active,

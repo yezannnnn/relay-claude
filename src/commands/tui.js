@@ -242,10 +242,9 @@ export default async function tuiCommand() {
           : '(无)'
       }`,
     );
+    const prePingPct = Math.round((configCache.scheduler?.preping_usage_threshold ?? 0.5) * 100);
     lines.push(
-      `${C.cyan}│${C.reset} 阈值: 切换=100%   预ping=${
-        N > 0 ? Math.round(100 / N) : 0
-      }% 或 ${staggerMin}min   错峰间隔=${staggerMin}min (300 ÷ ${N})`,
+      `${C.cyan}│${C.reset} 阈值: 切换=100%   预ping=${prePingPct}% 或 ${staggerMin}min   错峰间隔=${staggerMin}min (300 ÷ ${N})`,
     );
     lines.push(`${C.cyan}└${'─'.repeat(60)}${C.reset}`);
     lines.push('');

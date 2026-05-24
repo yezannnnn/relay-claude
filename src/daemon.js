@@ -94,6 +94,9 @@ export async function runDaemon(options = {}) {
   const pingFn = options.pingFn ?? pingWithRetry;
   const nowFn = options.nowFn ?? (() => new Date());
   const shouldStop = options.shouldStop ?? (() => false);
+  // 测试可注入假 Keychain，避免读真实系统 Keychain 导致测试 hang
+  const keychainSupportedFn = options.keychainSupportedFn ?? isKeychainSupported;
+  const readKeychainRawFn = options.readKeychainRawFn ?? readKeychainRaw;
 
   logFn('daemon: 主循环启动 (v0.3 动态调度)');
 
@@ -148,9 +151,9 @@ export async function runDaemon(options = {}) {
     // config 外的帐号（如自己的帐号），此时 pause 调度，避免强行覆盖。
     let active = null;
     let keychainUnknown = false;
-    if (isKeychainSupported()) {
+    if (keychainSupportedFn()) {
       try {
-        const raw = readKeychainRaw();
+        const raw = readKeychainRawFn();
         if (raw) {
           const creds = parseClaudeCredentials(raw);
           active = config.accounts.find(

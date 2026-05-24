@@ -74,6 +74,7 @@ test('runDaemon: shouldStop 立即返回 true → 0 次 ping 即退出', async (
   const { runDaemon } = await freshModule();
 
   await runDaemon({
+    keychainSupportedFn: () => false,
     checkIntervalMs: 50,
     shouldStop: () => true,
     pingFn: async () => {
@@ -103,6 +104,7 @@ test('runDaemon: mock pingFn 被调用至少 1 次', async () => {
   const { runDaemon } = await freshModule();
 
   await runDaemon({
+    keychainSupportedFn: () => false,
     checkIntervalMs: 50,
     shouldStop: () => pingCount > 0, // 第一次 ping 后立即退出
     pingFn: async (account) => {
@@ -126,6 +128,7 @@ test('runDaemon: ping 成功后 last_pings 被写入', async () => {
 
   let pingDone = false;
   await runDaemon({
+    keychainSupportedFn: () => false,
     checkIntervalMs: 50,
     shouldStop: () => pingDone,
     pingFn: async () => {
@@ -162,6 +165,7 @@ test('runDaemon: 单帐号 ping 失败不影响其他帐号', async () => {
 
   let callCount = 0;
   await runDaemon({
+    keychainSupportedFn: () => false,
     checkIntervalMs: 50,
     shouldStop: () => callCount >= 3, // 三个帐号都 ping 后退出
     pingFn: async (account) => {
@@ -210,6 +214,7 @@ test('runDaemon: 接收 nowFn 参数控制时间', async () => {
   const FIXED_TIME = new Date('2026-05-23T10:00:00.000Z');
 
   await runDaemon({
+    keychainSupportedFn: () => false,
     checkIntervalMs: 50,
     shouldStop: () => pingCount > 0,
     pingFn: async () => {
@@ -235,6 +240,7 @@ test('runDaemon: 两轮循环中 shouldStop 在第一次 ping 后返回 true', a
   let logCount = 0;
 
   await runDaemon({
+    keychainSupportedFn: () => false,
     checkIntervalMs: 50,
     logFn: () => {
       logCount++;
@@ -264,6 +270,7 @@ test('runDaemon: logFn 被调用记录日志', async () => {
   const logs = [];
 
   await runDaemon({
+    keychainSupportedFn: () => false,
     checkIntervalMs: 50,
     logFn: (msg) => {
       logs.push(msg);
@@ -301,6 +308,7 @@ test('runDaemon: ping 失败时 last_pings 不被写入', async () => {
 
   let pingDone = false;
   await runDaemon({
+    keychainSupportedFn: () => false,
     checkIntervalMs: 50,
     shouldStop: () => pingDone,
     pingFn: async () => {
@@ -332,6 +340,7 @@ test('runDaemon: 读取配置失败时继续循环不崩溃', async () => {
   let shouldStopCalls = 0;
 
   await runDaemon({
+    keychainSupportedFn: () => false,
     checkIntervalMs: 50,
     logFn: () => {
       logCount++;
