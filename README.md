@@ -1,27 +1,42 @@
 # relay-claude
 
-> Stagger multiple Claude Code accounts to extend your daily quota beyond the 5-hour limit.
+> **Turn your multiple Claude Code accounts into a relay pipeline — never get stuck waiting for a 5-hour window to reset.**
 
 [中文文档](./README.zh-CN.md) · [Changelog](./CHANGELOG.md)
 
-Each Claude account has a **5-hour rolling usage window**. With 3 accounts staggered 100 minutes apart, you get overlapping windows that cover an 8–9 hour workday. relay-claude automates this — pinging accounts to open their windows at the right time, scoring account health in real-time, and switching Keychain credentials the moment your active account runs out.
+## The Problem
+
+Claude Code enforces a **5-hour rolling usage window**. With a single account:
+
+```
+Account A  [09:00 ━━━━━━━━ depleted] …wait 5 hours… you're idle by 2pm
+```
+
+Multiple accounts don't help by default — each account's 5-hour window only starts counting **after first use**. So you burn through A, log in to B, *then* B's window starts (wait 5 more hours), then C (5 more hours)... Your accounts are islands, not a pipeline.
+
+## How relay-claude Solves It
+
+It chains your accounts into a **relay pipeline**:
+
+```
+Account A  [09:00 ━━━━━━━━━━━━━ 14:00]   ← you're here
+Account B        [10:15 ━━━━━━━━━━━━━ 15:15]   ← A hits 50% → wake B
+Account C              [11:30 ━━━━━━━━━━━━━ 16:30]   ← B hits 50% → wake C
+Account D                    [12:45 ━━━━━━━━━━━━━ 17:45]  ← forms a loop
+                ↑              ↑              ↑
+           you work       A full → B     B full → C
+```
+
+How it works:
+
+1. **Staggered activation** — interval is auto-calculated from account count (5h ÷ N). A background ping opens each backup's 5-hour window ahead of time
+2. **50% pre-launch** — when the active account hits 50% usage, the next backup is auto-pinged so it's already warmed up by the time you switch
+3. **Auto-switch** — when the active account hits 100%, the Keychain credential is swapped instantly. Every terminal's `claude` command updates immediately
+4. **Health scoring** — each account gets a real-time score (subscription weight × remaining quota × remaining window). The daemon always picks the highest-scoring backup
+
+The result: **A → B → C, and by the time C runs out, A's window has already reset.** Your accounts run like a conveyor belt — no more waiting.
 
 **macOS only** (depends on Keychain). Linux/Windows planned.
-
----
-
-## How It Works
-
-```
-Account A  [09:00 ━━━━━━━━━━━━━━━ 14:00]
-Account B        [10:40 ━━━━━━━━━━━━━━━ 15:40]
-Account C              [12:20 ━━━━━━━━━━━━━━━ 17:20]
-                    ↑            ↑            ↑
-               you work     A depleted    B depleted
-                             → switch B   → switch C
-```
-
-The daemon sends `claude -p "hi" --model haiku` (cheapest possible) to each account at the scheduled offset, triggering its 5-hour window. When the active account's usage hits 100% (or its window expires), the daemon picks the healthiest available account and switches the global Keychain credential — every terminal's `claude` command updates instantly.
 
 ---
 

@@ -94,7 +94,7 @@ export default async function tuiCommand() {
     render();
     let config = await loadConfig();
     let okCount = 0;
-    let failCount = 0;
+    const failed = [];
     for (const a of config.accounts) {
       if (!a.credentials) continue;
       try {
@@ -104,13 +104,19 @@ export default async function tuiCommand() {
         }
         config = setLastUsage(config, a.name, usage);
         okCount++;
-      } catch {
-        failCount++;
+      } catch (err) {
+        failed.push({ name: a.name, reason: err?.message ?? String(err) });
       }
     }
     await saveConfig(config);
     lastApiRefresh = new Date();
-    status = `已刷新 ${lastApiRefresh.toLocaleTimeString('zh-CN', { hour12: false })} — ${okCount} OK${failCount ? `, ${failCount} 失败` : ''}`;
+    const timeStr = lastApiRefresh.toLocaleTimeString('zh-CN', { hour12: false });
+    if (failed.length === 0) {
+      status = `已刷新 ${timeStr} — ${okCount} OK`;
+    } else {
+      const failNames = failed.map((f) => f.name).join(', ');
+      status = `已刷新 ${timeStr} — ${okCount} OK, ${failed.length} 失败: ${failNames}`;
+    }
     apiRefreshing = false;
     if (fromUser) busy = false;
     await refreshLocal();
