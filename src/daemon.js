@@ -28,7 +28,7 @@ import { dueAccounts, schedule, ACTION_PING, ACTION_USE, health } from './schedu
 import { pingWithRetry } from './pinger.js';
 import { appendLog, toCST } from './logger.js';
 import { queryUsageWithRefresh, refreshAccessToken, isExpiringSoon } from './oauth.js';
-import { sendNotification } from './notifier.js';
+import { dispatchNotification } from './notifier.js';
 import { isKeychainSupported, readKeychainRaw, parseClaudeCredentials } from './keychain.js';
 
 const DEFAULT_CHECK_INTERVAL_MS = 60_000;
@@ -53,7 +53,7 @@ async function interruptibleSleep(ms, shouldStop) {
  * 在 ping 成功后调用：查 usage、自动续期临期 token，回写 config。
  * 此操作失败不影响 ping 主流程（v0.1 legacy_token 没法查 usage，直接跳过）。
  */
-async function refreshUsageAndToken(accountName, logFn) {
+async function refreshUsageAndToken(accountName, logFn, pingedAt = Date.now()) {
   let config;
   try {
     config = await loadConfig();
@@ -73,6 +73,24 @@ async function refreshUsageAndToken(accountName, logFn) {
     await saveConfig(config);
   } catch (err) {
     logFn(`usage refresh failed for ${accountName}: ${err?.message ?? err}`);
+    // 兜底：usage 查询失败（如 429 限流）也要标记窗口已激活，避免下个周期重复 PING
+    // 写入一个预估的 5h 窗口（ping 时间起算），后续 ping 拿到真实数据会覆盖
+    if (!account.last_usage?.five_hour?.resets_at) {
+      const FULL_WINDOW_MS = 5 * 60 * 60 * 1000;
+      const placeholder = {
+        five_hour: {
+          utilization: 0,
+          resets_at: new Date(pingedAt + FULL_WINDOW_MS).toISOString(),
+        },
+      };
+      try {
+        config = setLastUsage(config, accountName, placeholder);
+        await saveConfig(config);
+        logFn(`placeholder window set for ${accountName} (avoid re-ping loop)`);
+      } catch (e) {
+        logFn(`failed to set placeholder for ${accountName}: ${e?.message ?? e}`);
+      }
+    }
   }
 }
 
@@ -198,8 +216,8 @@ export async function runDaemon(options = {}) {
           : '所有帐号耗尽且无重置时间信息';
         logFn(`daemon: ${msg}`);
         if (config.scheduler?.notify !== false) {
-          await sendNotification({
-            title: 'intervalClaude',
+          await dispatchNotification({
+            title: 'relay-claude',
             subtitle: '⚠️ 所有帐号耗尽',
             message: msg,
           });
@@ -210,9 +228,13 @@ export async function runDaemon(options = {}) {
       continue;
     }
 
+    // 是否纯预 ping（没跟着 USE）— 用于决定要不要发"已激活备用"通知
+    const isStandalonePing = actions.length === 1 && actions[0].type === ACTION_PING;
+
     // 执行动作
-    for (const act of actions) {
+    for (let i = 0; i < actions.length; i++) {
       if (shouldStop()) break;
+      const act = actions[i];
       const target = act.account;
       const tsIso = toCST(nowFn());
       const h = Math.round(health(target, config, nowMs));
@@ -222,11 +244,22 @@ export async function runDaemon(options = {}) {
         try {
           const result = await pingFn(target, config.ping_prompt);
           if (result?.success) {
-            await recordPing(target.name, nowFn().toISOString());
+            const pingedAtMs = nowFn().getTime();
+            await recordPing(target.name, new Date(pingedAtMs).toISOString());
             limitReachedAt.delete(target.name);
             logFn(`[${tsIso}] PING ${target.name}: OK`);
-            await refreshUsageAndToken(target.name, logFn);
+            await refreshUsageAndToken(target.name, logFn, pingedAtMs);
             allExhaustedNotified = false;
+
+            // 错峰预 ping 才发通知（同组里跟着 USE 的 PING 不发，避免双通知）
+            if (isStandalonePing && config.scheduler?.notify !== false) {
+              const reason = describePrePingReason(active, config, nowMs);
+              await dispatchNotification({
+                title: 'relay-claude',
+                subtitle: '已预激活备用帐号',
+                message: `${target.name} 5h 窗口已开启${reason ? ` (${reason})` : ''}`,
+              });
+            }
           } else if (result?.limitReached) {
             limitReachedAt.set(target.name, nowMs);
             logFn(`[${tsIso}] PING ${target.name}: LIMIT_REACHED`);
@@ -242,10 +275,11 @@ export async function runDaemon(options = {}) {
         try {
           await performUseFromDaemon(target.name);
           if (config.scheduler?.notify !== false) {
-            await sendNotification({
-              title: 'intervalClaude',
+            const fromName = active?.name ?? '上一个帐号';
+            await dispatchNotification({
+              title: 'relay-claude',
               subtitle: '已切换帐号',
-              message: `当前活跃: ${target.name}`,
+              message: `${fromName} → ${target.name}`,
             });
           }
           allExhaustedNotified = false;
@@ -260,6 +294,43 @@ export async function runDaemon(options = {}) {
   }
 
   logFn('daemon: 主循环退出');
+}
+
+/** 推断预 ping 的触发原因（时间到 / 用量到），用于通知文案 */
+function describePrePingReason(active, config, nowMs) {
+  if (!active) return '';
+  const N = config.accounts?.length ?? 0;
+  if (N <= 1) return '';
+  const stagger = config.scheduler?.stagger_min ?? Math.round(300 / N);
+  const threshold = config.scheduler?.preping_usage_threshold ?? 0.5;
+
+  let windowStartMs;
+  if (active.window_start) {
+    windowStartMs = active.window_start;
+  } else if (active.last_usage?.five_hour?.resets_at) {
+    windowStartMs =
+      new Date(active.last_usage.five_hour.resets_at).getTime() - 300 * 60_000;
+  } else {
+    windowStartMs = nowMs;
+  }
+  const elapsedMin = Math.round((nowMs - windowStartMs) / 60_000);
+  const usage = active.last_usage?.five_hour?.utilization ?? 0;
+  const usagePct = Math.round(usage * 100);
+  const thresholdPct = Math.round(threshold * 100);
+
+  // 哪个条件先满足，就归因到那个
+  const timeReached = elapsedMin >= stagger;
+  const usageReached = usage >= threshold;
+  if (timeReached && !usageReached) {
+    return `${active.name} 已运行 ${elapsedMin}min，达到错峰间隔`;
+  }
+  if (usageReached && !timeReached) {
+    return `${active.name} 用量 ${usagePct}% ≥ ${thresholdPct}%`;
+  }
+  if (timeReached && usageReached) {
+    return `${active.name} 用量 ${usagePct}% / 已跑 ${elapsedMin}min`;
+  }
+  return '';
 }
 
 /** 找最早重置的帐号 */

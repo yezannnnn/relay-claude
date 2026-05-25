@@ -280,13 +280,13 @@ test('shouldPrePing: 没到时间也没到进度 → null', () => {
   assert.equal(result, null);
 });
 
-test('shouldPrePing: 已有 1 备用在跑 → next_index=1, 触发第 2 备用 (elapsed=150min)', () => {
+test('shouldPrePing: 已有 1 备用在跑 → 不再 ping 下一个（链式策略，等切换后由新 active 触发）', () => {
   const active = mkAccount({
     name: 'M',
     sub: 'max_5x',
-    usage: 0.4,
-    resetsAt: new Date(T0 + 150 * 60 * 1000).toISOString(),
-    windowStart: T0 - 150 * 60 * 1000,
+    usage: 0.8,  // 即使主帐号用量很高
+    resetsAt: new Date(T0 + 30 * 60 * 1000).toISOString(),
+    windowStart: T0 - 270 * 60 * 1000,
   });
   const accounts = [
     active,
@@ -301,8 +301,7 @@ test('shouldPrePing: 已有 1 备用在跑 → next_index=1, 触发第 2 备用 
     mkAccount({ name: 'C', sub: 'pro' }),
   ];
   const result = shouldPrePing(accounts, active, mkCfg(), T0);
-  assert.ok(result);
-  assert.ok(['B', 'C'].includes(result.name));
+  assert.equal(result, null, '已有备用 A 在跑，不应再 ping 其他备用');
 });
 
 test('shouldPrePing: 所有备用都启动了 → null', () => {

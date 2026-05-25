@@ -102,8 +102,8 @@ async function renderFrame() {
 
   // 计算 header
   const header = status.running
-    ? `intervalClaude · 守护进程运行中（uptime ${status.uptime ?? '?'}）`
-    : 'intervalClaude · 守护进程未运行 — 运行 interval-claude start 启动';
+    ? `▲ relay-claude · 守护进程运行中（uptime ${status.uptime ?? '?'}）`
+    : '▲ relay-claude · 守护进程未运行 — 运行 relay-claude start 启动';
 
   // 决定外框宽度
   const contentWidth = Math.max(

@@ -205,6 +205,24 @@ With 4 accounts, the stagger interval is `300 ÷ 4 = 75 minutes` and the usage t
 - **Ping model**: all pings use `--model haiku` (cheapest model) to minimize quota impact.
 - **Token auto-renewal**: tokens expiring in < 30 minutes are renewed proactively to prevent silent expiry.
 
+### Notifications
+
+The daemon sends macOS notifications on these events:
+
+| Event | Message |
+|-------|---------|
+| Backup pre-activated (stagger time or usage threshold reached) | `已预激活备用帐号: B 5h window opened` |
+| Auto-switch (active account exhausted) | `已切换帐号: primary → backup1` |
+| All accounts exhausted | `⚠️ All accounts depleted, earliest reset: backup2 (45m)` |
+
+> 📌 **Want notifications to show iTerm2 as the source instead of "Script Editor"?** Install [`terminal-notifier`](https://github.com/julienXX/terminal-notifier):
+> ```bash
+> brew install terminal-notifier
+> ```
+> No config needed — the daemon auto-detects and uses it. This is a macOS Big Sur+ limitation; `osascript` alone can't set the notification's source app.
+
+Set `scheduler.notify: false` to disable notifications entirely.
+
 ---
 
 ## Commands

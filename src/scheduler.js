@@ -90,15 +90,39 @@ export function needsSwitch(active, cfg, now = Date.now()) {
   return false;
 }
 
-/** 选最佳切换候选 */
+/**
+ * 切换时的最小剩余窗口（分钟）— 已激活账户剩余少于此值则视为"接力价值低"，
+ * 让位给未激活账户的全新 5h 窗口。
+ */
+export const MIN_REMAINING_FOR_RELAY = 10;
+
+/**
+ * 选最佳切换候选 — 接力优先策略。
+ *
+ * 优先级:
+ *   1. 已激活且剩余窗口 >= MIN_REMAINING_FOR_RELAY 的备用（接力链）
+ *      → 选这一组里 health 最高的
+ *   2. 否则退回所有 health > 0 的备用（含未激活、刚过期的）
+ *      → 选这一组里 health 最高的
+ *
+ * 这样能利用我们预激活时投入的等待时间，避免预激活白做。
+ */
 export function bestSwitchCandidate(accounts, exclude, cfg, now = Date.now()) {
   const candidates = accounts.filter((a) => {
     if (exclude && a.name === exclude.name) return false;
     return health(a, cfg, now) > 0;
   });
   if (candidates.length === 0) return null;
-  candidates.sort((a, b) => health(b, cfg, now) - health(a, cfg, now));
-  return candidates[0];
+
+  const relayReady = candidates.filter((a) => {
+    if (isWindowNotStarted(a) || isWindowExpired(a, now)) return false;
+    const remainMin = windowRemainingMin(a, now);
+    return remainMin >= MIN_REMAINING_FOR_RELAY;
+  });
+
+  const pool = relayReady.length > 0 ? relayReady : candidates;
+  pool.sort((a, b) => health(b, cfg, now) - health(a, cfg, now));
+  return pool[0];
 }
 
 /**
@@ -123,11 +147,13 @@ export function shouldPrePing(accounts, active, cfg, now = Date.now()) {
       currentUsage(a) < 1.0
   ).length;
 
-  const nextIndex = runningBackups;
-  if (nextIndex >= dormant.length) return null;
+  // 链式策略：每个 active 只负责激活"下一个"备用。
+  // 一旦已经有备用在跑，当前 active 就不再继续 ping 后面的备用 ——
+  // 等它用完切换到那个备用后，新 active 自己再触发下一次预 ping。
+  // 这样避免一次性 ping 多个备用、过早消耗 5h 窗口。
+  if (runningBackups >= 1) return null;
 
   const stagger = cfg?.scheduler?.stagger_min ?? FULL_WINDOW_MIN / N;
-  const targetTimeMin = (nextIndex + 1) * stagger;
   const prePingThreshold = cfg?.scheduler?.preping_usage_threshold ?? 0.5;
 
   // 计算主帐号已运行多久 — 优先用显式 window_start，回退反推自 resets_at
@@ -144,7 +170,8 @@ export function shouldPrePing(accounts, active, cfg, now = Date.now()) {
   const elapsedMin = (now - windowStartMs) / 60_000;
   const usage = currentUsage(active);
 
-  if (elapsedMin >= targetTimeMin || usage >= prePingThreshold) {
+  // 任一信号触发：时间到 stagger 或 用量到阈值
+  if (elapsedMin >= stagger || usage >= prePingThreshold) {
     return dormant[0];
   }
   return null;

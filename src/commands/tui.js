@@ -19,7 +19,7 @@ import useCommand from './use.js';
 import { runPing } from './ping-cmd.js';
 
 const REFRESH_INTERVAL_MS = 10_000;
-const API_REFRESH_INTERVAL_MS = 60_000;
+const API_REFRESH_INTERVAL_MS = 300_000; // 5 分钟一次，避免 Anthropic 限流
 
 // ANSI 颜色
 const C = {
@@ -95,8 +95,11 @@ export default async function tuiCommand() {
     let config = await loadConfig();
     let okCount = 0;
     const failed = [];
-    for (const a of config.accounts) {
-      if (!a.credentials) continue;
+    const accountList = config.accounts.filter((a) => a.credentials);
+    for (let i = 0; i < accountList.length; i++) {
+      const a = accountList[i];
+      // 账户间隔 800ms，避免 Anthropic IP 限流（多账户共享同 IP 调用 usage）
+      if (i > 0) await new Promise((r) => setTimeout(r, 800));
       try {
         const { usage, credentials } = await queryUsageWithRefresh(a.credentials);
         if (credentials.accessToken !== a.credentials.accessToken) {
@@ -214,8 +217,8 @@ export default async function tuiCommand() {
       ? `${C.yellow}⟳ 刷新中...${C.reset}`
       : lastApiRefresh
         ? `${C.dim}上次刷新: ${lastApiRefresh.toLocaleTimeString('zh-CN', { hour12: false })}${C.reset}`
-        : `${C.dim}自动刷新: 1m${C.reset}`;
-    lines.push(`${C.bold}intervalClaude${C.reset}    ${C.gray}${now}${C.reset}    ${refreshTag}    Daemon: ${daemon}    ${configCache.accounts.length} accounts`);
+        : `${C.dim}自动刷新: 5min${C.reset}`;
+    lines.push(`${C.cyan}${C.bold}▲ relay-claude${C.reset}    ${C.gray}${now}${C.reset}    ${refreshTag}    Daemon: ${daemon}    ${configCache.accounts.length} accounts`);
     lines.push('');
 
     // 计算每个帐号的健康度（缓存到 a._health 供表格使用）

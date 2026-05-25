@@ -20,8 +20,7 @@ import pingCommand from './commands/ping-cmd.js';
 import watchCommand from './commands/watch.js';
 import removeCommand from './commands/remove.js';
 import tuiCommand from './commands/tui.js';
-
-const VERSION = '0.3.0';
+import { printBanner, VERSION } from './banner.js';
 
 /**
  * 主入口。args = process.argv.slice(2)
@@ -31,11 +30,12 @@ export async function main(args) {
   const rest = args.slice(1);
 
   if (!cmd || cmd === '--help' || cmd === '-h' || cmd === 'help') {
+    printBanner({ version: VERSION });
     printHelp();
     return;
   }
   if (cmd === '--version' || cmd === '-v') {
-    console.log(`interval-claude ${VERSION}`);
+    printBanner({ version: VERSION });
     return;
   }
 
@@ -75,7 +75,7 @@ export async function main(args) {
 }
 
 function printHelp() {
-  console.log(`interval-claude ${VERSION} — 错峰激活多个 Claude 帐号
+  console.log(`relay-claude ${VERSION} — 多账户 Claude Code 额度接力
 
 用法:
   interval-claude <command> [options]

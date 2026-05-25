@@ -17,7 +17,7 @@ export default async function initCommand() {
     process.exit(1);
   }
 
-  console.log('欢迎使用 intervalClaude — 让我们添加第一个帐号。');
+  console.log('欢迎使用 relay-claude — 让我们添加第一个帐号。');
   console.log('');
 
   try {

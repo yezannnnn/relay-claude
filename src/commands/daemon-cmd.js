@@ -5,11 +5,14 @@
 import { loadConfig } from '../config.js';
 import { startDaemon, stopDaemon, daemonStatus } from '../daemon.js';
 import { getLogPath } from '../logger.js';
+import { printBanner, VERSION } from '../banner.js';
 
 export async function startCommand(args = []) {
+  printBanner({ version: VERSION, tagline: '启动守护进程' });
+
   const config = await loadConfig();
   if ((config.accounts ?? []).length === 0) {
-    console.error('未配置任何帐号。先运行 `interval-claude add <name>` 添加帐号。');
+    console.error('未配置任何帐号。先运行 `relay-claude add <name>` 添加帐号。');
     process.exit(1);
   }
 

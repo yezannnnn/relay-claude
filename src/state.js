@@ -119,6 +119,41 @@ export async function clearDaemonPid() {
 }
 
 /**
+ * TUI 启动时登记自己的 PID，daemon 可据此判断是否走 OSC 9 路径。
+ */
+export async function setTuiAttachedPid(pid) {
+  const state = await loadState();
+  state.tui_attached_pid =
+    typeof pid === 'number' && Number.isFinite(pid) ? pid : null;
+  await saveState(state);
+}
+
+/**
+ * TUI 退出时清除 PID。
+ */
+export async function clearTuiAttachedPid() {
+  const state = await loadState();
+  state.tui_attached_pid = null;
+  await saveState(state);
+}
+
+/**
+ * daemon 端调用：检查是否有活跃的 TUI 在监听通知。
+ */
+export async function isTuiAttached() {
+  const state = await loadState();
+  const pid = state.tui_attached_pid;
+  if (typeof pid !== 'number' || !Number.isFinite(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    if (err.code === 'EPERM') return true;
+    return false;
+  }
+}
+
+/**
  * 检测当前 state.json 中记录的 daemon_pid 对应进程是否仍存活。
  *
  * 实现细节:

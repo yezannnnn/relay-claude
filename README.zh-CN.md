@@ -197,6 +197,24 @@ Max 5x 账户 50% 用量的健康度，远高于一个全新的 Pro 账户。
 - **Ping 使用 Haiku 模型**：每次 ping 消耗极小，不影响额度
 - **Token 主动续期**：临期 30 分钟内自动刷新，防止 token 静默过期
 
+### 通知
+
+daemon 在以下场景发送 macOS 系统通知：
+
+| 场景 | 文案 |
+|------|------|
+| 预激活备用（时间到 stagger 或用量到 50%） | `已预激活备用帐号：B 5h 窗口已开启` |
+| 自动切换账户（主账户用满） | `已切换帐号：主力 → 备用1` |
+| 全部账户耗尽 | `⚠️ 所有帐号耗尽，最早重置 备用2 (45m 后)` |
+
+> 📌 **想让通知显示来源为 iTerm2 而不是"脚本编辑器"？** 安装 [`terminal-notifier`](https://github.com/julienXX/terminal-notifier)：
+> ```bash
+> brew install terminal-notifier
+> ```
+> 安装后无需任何配置，daemon 会自动检测并使用它。这是 macOS Big Sur 之后的系统限制，仅靠 osascript 无法指定通知来源 app。
+
+可通过 `scheduler.notify: false` 整体关闭通知。
+
 ---
 
 ## 命令一览
