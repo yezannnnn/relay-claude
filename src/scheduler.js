@@ -57,7 +57,11 @@ function currentUsage(account) {
  * - 耗尽：0
  * - 即将过期 (< threshold)：0
  * - 活跃中：weight × (1-usage) × remaining_min
+ * - 占位窗口（usage 查询失败时 daemon 写入的兜底数据）：打 0.3 折扣
+ *   防止"假满血"账户被优先选作切换目标导致震荡
  */
+export const PLACEHOLDER_HEALTH_FACTOR = 0.3;
+
 export function health(account, cfg, now = Date.now()) {
   if (!account) return 0;
   const weight = subWeight(account, cfg);
@@ -73,7 +77,12 @@ export function health(account, cfg, now = Date.now()) {
   const threshold = cfg?.scheduler?.expire_threshold_min ?? DEFAULT_EXPIRE_THRESHOLD_MIN;
   if (remaining < threshold) return 0;
   const remainingUsage = 1 - currentUsage(account);
-  return weight * remainingUsage * remaining;
+  const base = weight * remainingUsage * remaining;
+  // 占位数据不可信，降低健康度
+  if (account?.last_usage?.five_hour?.isPlaceholder) {
+    return base * PLACEHOLDER_HEALTH_FACTOR;
+  }
+  return base;
 }
 
 /** 判断是否需要切换主帐号 */

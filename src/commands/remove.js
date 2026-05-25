@@ -1,7 +1,7 @@
 // v0.2 remove — 删除指定帐号
 // 支持 --yes / -y 跳过删除确认
 
-import { loadConfig, saveConfig, removeAccount } from '../config.js';
+import { loadConfig, removeAccount, updateConfig } from '../config.js';
 import { prompt as ask, closePrompt as close } from './prompt.js';
 
 export default async function removeCommand(args) {
@@ -30,7 +30,6 @@ export default async function removeCommand(args) {
     }
   }
 
-  const newConfig = removeAccount(config, name);
-  await saveConfig(newConfig);
+  await updateConfig((cfg) => removeAccount(cfg, name));
   console.log(`✅ 已删除 ${name}`);
 }

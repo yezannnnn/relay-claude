@@ -10,10 +10,10 @@
 //   - 每 10s 自动从本地缓存重绘 (倒计时实时变化)，无 API 调用
 //   - 仅本地变化时光标回顶覆盖，不清屏，无闪烁
 
-import { loadConfig, saveConfig, getAccessToken, setLastUsage, setCredentials } from '../config.js';
+import { loadConfig, getAccessToken, setLastUsage, updateConfig } from '../config.js';
 import { daemonStatus } from '../daemon.js';
 import { isKeychainSupported, readKeychainRaw, parseClaudeCredentials } from '../keychain.js';
-import { queryUsageWithRefresh } from '../oauth.js';
+import { queryUsage } from '../oauth.js';
 import { health as healthScore } from '../scheduler.js';
 import useCommand from './use.js';
 import { runPing } from './ping-cmd.js';
@@ -92,34 +92,56 @@ export default async function tuiCommand() {
     if (fromUser) busy = true;
     status = '正在刷新所有帐号 usage...';
     render();
-    let config = await loadConfig();
-    let okCount = 0;
-    const failed = [];
+    // 关键设计变更（v0.4 修复 race condition）：
+    //   - TUI 只读 usage（queryUsage），不主动 refresh token
+    //   - token 续期统一由 daemon 负责，避免多入口竞争破坏 refresh chain
+    //   - 写 config 走 updateConfig（每次都重新 loadConfig 拿最新版本），
+    //     只 patch last_usage 字段，不动 credentials → 不会覆盖 daemon 的写入
+    const config = await loadConfig();
     const accountList = config.accounts.filter((a) => a.credentials);
+    const okList = [];
+    const staleList = []; // token 过期，等 daemon 续期
+    const failed = [];
+
     for (let i = 0; i < accountList.length; i++) {
       const a = accountList[i];
-      // 账户间隔 800ms，避免 Anthropic IP 限流（多账户共享同 IP 调用 usage）
+      // 账户间隔 800ms，避免 Anthropic IP 限流
       if (i > 0) await new Promise((r) => setTimeout(r, 800));
       try {
-        const { usage, credentials } = await queryUsageWithRefresh(a.credentials);
-        if (credentials.accessToken !== a.credentials.accessToken) {
-          config = setCredentials(config, a.name, credentials);
-        }
-        config = setLastUsage(config, a.name, usage);
-        okCount++;
+        const usage = await queryUsage(a.credentials.accessToken);
+        okList.push({ name: a.name, usage });
       } catch (err) {
-        failed.push({ name: a.name, reason: err?.message ?? String(err) });
+        const msg = err?.message ?? String(err);
+        // 401 / token expired → 等 daemon 续期，不报错
+        if (/401|expired|invalid_token/i.test(msg)) {
+          staleList.push(a.name);
+        } else {
+          failed.push({ name: a.name, reason: msg });
+        }
       }
     }
-    await saveConfig(config);
+
+    // 原子写入 — 只 patch last_usage，不动 credentials
+    if (okList.length > 0) {
+      await updateConfig((cfg) => {
+        let next = cfg;
+        for (const { name, usage } of okList) {
+          next = setLastUsage(next, name, usage);
+        }
+        return next;
+      });
+    }
     lastApiRefresh = new Date();
     const timeStr = lastApiRefresh.toLocaleTimeString('zh-CN', { hour12: false });
-    if (failed.length === 0) {
-      status = `已刷新 ${timeStr} — ${okCount} OK`;
-    } else {
-      const failNames = failed.map((f) => f.name).join(', ');
-      status = `已刷新 ${timeStr} — ${okCount} OK, ${failed.length} 失败: ${failNames}`;
+    const parts = [`${okList.length} OK`];
+    if (staleList.length > 0) {
+      parts.push(`${staleList.length} 待续期(${staleList.join(',')})`);
     }
+    if (failed.length > 0) {
+      const failNames = failed.map((f) => f.name).join(',');
+      parts.push(`${failed.length} 失败(${failNames})`);
+    }
+    status = `已刷新 ${timeStr} — ${parts.join(', ')}`;
     apiRefreshing = false;
     if (fromUser) busy = false;
     await refreshLocal();
@@ -396,41 +418,71 @@ function fmtNextPing(account, status, configCache, activeAcc, nowMs) {
   if (u?.resets_at && new Date(u.resets_at).getTime() > nowMs) {
     return '-';
   }
+  // 已耗尽：等待重置，无法预 ping
+  if (u && (u.utilization ?? 0) >= 1.0) return '-';
 
   // 未激活：预估下次预 ping 时间
   if (!activeAcc || !configCache || !status?.running) return '-';
 
-  const N = configCache.accounts.length;
-  const stagger =
-    configCache.scheduler?.stagger_min ?? (N > 0 ? 300 / N : 75);
-
-  // 未激活帐号按健康度排序后的索引
-  const dormant = configCache.accounts
-    .filter(
-      (a) => a !== activeAcc && !a.last_usage?.five_hour?.resets_at,
-    )
-    .sort((a, b) => (b._health ?? 0) - (a._health ?? 0));
-  const idx = dormant.indexOf(account);
-  if (idx < 0) return '-';
-
-  // 已激活备用数（不算活跃帐号）
-  const running = configCache.accounts.filter(
+  // 链式策略：如果已经有备用在跑，主账户不会预 ping 更多备用
+  // 等切换到那个备用后才会接力，所以当前 active 期间这些待激活账户处于"等待"
+  const runningBackups = configCache.accounts.filter(
     (a) =>
       a !== activeAcc &&
       a.last_usage?.five_hour?.resets_at &&
       new Date(a.last_usage.five_hour.resets_at).getTime() > nowMs &&
       (a.last_usage?.five_hour?.utilization ?? 0) < 1.0,
   ).length;
+  if (runningBackups >= 1) return 'wait';
 
-  const targetIdx = idx + running;
-  const targetTimeMin = (targetIdx + 1) * stagger;
+  // 选下一个被 ping 的目标（healthy 最高的待激活账户）
+  const dormant = configCache.accounts
+    .filter(
+      (a) =>
+        a !== activeAcc &&
+        !(
+          a.last_usage?.five_hour?.resets_at &&
+          new Date(a.last_usage.five_hour.resets_at).getTime() > nowMs
+        ) &&
+        (a.last_usage?.five_hour?.utilization ?? 0) < 1.0,
+    )
+    .sort((a, b) => (b._health ?? 0) - (a._health ?? 0));
+  if (dormant[0] !== account) return 'wait';
 
-  const startMs = status?.startedAt
-    ? new Date(status.startedAt).getTime()
-    : nowMs;
-  const elapsedMin = Math.max(0, (nowMs - startMs) / 60_000);
-  const remainMin = Math.max(0, Math.round(targetTimeMin - elapsedMin));
-  return `ping@${remainMin}m`;
+  // 是下一个目标 → 估算还要多久
+  const N = configCache.accounts.length;
+  const stagger =
+    configCache.scheduler?.stagger_min ?? (N > 0 ? 300 / N : 75);
+  const threshold = configCache.scheduler?.preping_usage_threshold ?? 0.5;
+
+  // 基于 active 账户的窗口起点算 elapsed（而不是 daemon 启动时间）
+  let windowStartMs;
+  if (activeAcc.window_start) {
+    windowStartMs = activeAcc.window_start;
+  } else if (activeAcc.last_usage?.five_hour?.resets_at) {
+    windowStartMs =
+      new Date(activeAcc.last_usage.five_hour.resets_at).getTime() -
+      5 * 3600 * 1000;
+  } else {
+    windowStartMs = nowMs;
+  }
+  const elapsedMin = Math.max(0, (nowMs - windowStartMs) / 60_000);
+
+  // 时间维度：距离 stagger 还有多久
+  const timeRemain = Math.max(0, stagger - elapsedMin);
+
+  // 用量维度：按当前消耗速度估算到达 threshold 还要多久
+  const activeUsage = activeAcc.last_usage?.five_hour?.utilization ?? 0;
+  let usageRemain = Infinity;
+  if (activeUsage >= threshold) {
+    usageRemain = 0;
+  } else if (activeUsage > 0 && elapsedMin > 1) {
+    const rate = activeUsage / elapsedMin; // %/min
+    usageRemain = (threshold - activeUsage) / rate;
+  }
+
+  const remain = Math.max(0, Math.round(Math.min(timeRemain, usageRemain)));
+  return remain === 0 ? 'soon' : `ping@${remain}m`;
 }
 
 function fmtStateLabel(account, isActive, nowMs) {

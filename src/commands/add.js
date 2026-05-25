@@ -4,7 +4,7 @@
 //   2. 单个 name → 单条捕获
 //   3. --offset N → 覆盖自动计算的 offset
 
-import { loadConfig, saveConfig, addAccount, setLastUsage, setCredentials } from '../config.js';
+import { loadConfig, addAccount, setLastUsage, setCredentials, updateConfig } from '../config.js';
 import { readCredentials, isKeychainSupported } from '../keychain.js';
 import { queryUsage, queryProfile } from '../oauth.js';
 import { prompt as ask, closePrompt as close } from './prompt.js';
@@ -65,21 +65,20 @@ async function captureOne(name, { offsetMinutes }) {
     credentials = { ...credentials, email: profile.email };
   }
 
-  let newConfig;
-  if (isUpdate) {
-    // 更新模式：保留 offset_minutes 等其他字段，只覆盖 credentials + last_usage
-    newConfig = setCredentials(config, name, credentials);
-  } else {
-    const autoOffset =
-      offsetMinutes ?? config.accounts.length * (config.interval_minutes || 100);
-    newConfig = addAccount(config, {
-      name,
-      credentials,
-      offsetMinutes: autoOffset,
-    });
-  }
-  if (usage) newConfig = setLastUsage(newConfig, name, usage);
-  await saveConfig(newConfig);
+  // 在 updateConfig 里 reload + patch，避免和 daemon 续期等并发写入互相覆盖
+  await updateConfig((cfg) => {
+    const existing = cfg.accounts.find((a) => a.name === name);
+    let next;
+    if (existing) {
+      next = setCredentials(cfg, name, credentials);
+    } else {
+      const autoOffset =
+        offsetMinutes ?? cfg.accounts.length * (cfg.interval_minutes || 100);
+      next = addAccount(cfg, { name, credentials, offsetMinutes: autoOffset });
+    }
+    if (usage) next = setLastUsage(next, name, usage);
+    return next;
+  });
 
   console.log(`✅ ${isUpdate ? '已更新' : '已添加'} ${name}`);
   if (credentials.email) console.log(`   邮箱: ${credentials.email}`);

@@ -16,7 +16,13 @@ import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { loadConfig, saveConfig, setCredentials, setLastUsage } from './config.js';
+import {
+  loadConfig,
+  saveConfig,
+  setCredentials,
+  setLastUsage,
+  updateConfig,
+} from './config.js';
 import {
   loadState,
   recordPing,
@@ -29,7 +35,13 @@ import { pingWithRetry } from './pinger.js';
 import { appendLog, toCST } from './logger.js';
 import { queryUsageWithRefresh, refreshAccessToken, isExpiringSoon } from './oauth.js';
 import { dispatchNotification } from './notifier.js';
-import { isKeychainSupported, readKeychainRaw, parseClaudeCredentials } from './keychain.js';
+import {
+  isKeychainSupported,
+  readKeychainRaw,
+  writeKeychainRaw,
+  parseClaudeCredentials,
+  serializeCredentials,
+} from './keychain.js';
 
 const DEFAULT_CHECK_INTERVAL_MS = 60_000;
 const STOP_GRACE_MS = 5_000;
@@ -54,42 +66,56 @@ async function interruptibleSleep(ms, shouldStop) {
  * 此操作失败不影响 ping 主流程（v0.1 legacy_token 没法查 usage，直接跳过）。
  */
 async function refreshUsageAndToken(accountName, logFn, pingedAt = Date.now()) {
-  let config;
+  // 先读一次拿到当前帐号引用
+  let initialConfig;
   try {
-    config = await loadConfig();
+    initialConfig = await loadConfig();
   } catch (err) {
     logFn(`usage refresh: 加载 config 失败 ${err?.message ?? err}`);
     return;
   }
-  const account = config.accounts.find((a) => a.name === accountName);
+  const account = initialConfig.accounts.find((a) => a.name === accountName);
   if (!account?.credentials) return;
   try {
     const { usage, credentials } = await queryUsageWithRefresh(account.credentials);
-    config = setLastUsage(config, accountName, usage);
+    // 原子写入：避免被其他写入路径覆盖
+    await updateConfig((cfg) => {
+      let next = setLastUsage(cfg, accountName, usage);
+      const existing = next.accounts.find((a) => a.name === accountName);
+      if (existing?.credentials?.accessToken !== credentials.accessToken) {
+        next = setCredentials(next, accountName, credentials);
+      }
+      return next;
+    });
     if (credentials.accessToken !== account.credentials.accessToken) {
-      config = setCredentials(config, accountName, credentials);
       logFn(`token refreshed for ${accountName}`);
     }
-    await saveConfig(config);
   } catch (err) {
     logFn(`usage refresh failed for ${accountName}: ${err?.message ?? err}`);
-    // 兜底：usage 查询失败（如 429 限流）也要标记窗口已激活，避免下个周期重复 PING
-    // 写入一个预估的 5h 窗口（ping 时间起算），后续 ping 拿到真实数据会覆盖
-    if (!account.last_usage?.five_hour?.resets_at) {
-      const FULL_WINDOW_MS = 5 * 60 * 60 * 1000;
-      const placeholder = {
-        five_hour: {
-          utilization: 0,
-          resets_at: new Date(pingedAt + FULL_WINDOW_MS).toISOString(),
-        },
-      };
-      try {
-        config = setLastUsage(config, accountName, placeholder);
-        await saveConfig(config);
-        logFn(`placeholder window set for ${accountName} (avoid re-ping loop)`);
-      } catch (e) {
-        logFn(`failed to set placeholder for ${accountName}: ${e?.message ?? e}`);
-      }
+    // 兜底：usage 查询失败（如 429 限流）也要标记窗口已激活，避免下次周期重复 PING
+    // 写入一个预估窗口，并加 isPlaceholder 标记 — 调度器看到此标记会降低健康度，
+    // 防止"假满血"账户被优先选作切换目标导致震荡
+    try {
+      await updateConfig((cfg) => {
+        const existing = cfg.accounts.find((a) => a.name === accountName);
+        // 已有真实 resets_at 就不要覆盖
+        if (existing?.last_usage?.five_hour?.resets_at &&
+            !existing.last_usage.five_hour.isPlaceholder) {
+          return cfg;
+        }
+        const FULL_WINDOW_MS = 5 * 60 * 60 * 1000;
+        const placeholder = {
+          five_hour: {
+            utilization: 0,
+            resets_at: new Date(pingedAt + FULL_WINDOW_MS).toISOString(),
+            isPlaceholder: true,
+          },
+        };
+        return setLastUsage(cfg, accountName, placeholder);
+      });
+      logFn(`placeholder window set for ${accountName} (avoid re-ping loop)`);
+    } catch (e) {
+      logFn(`failed to set placeholder for ${accountName}: ${e?.message ?? e}`);
     }
   }
 }
@@ -122,6 +148,9 @@ export async function runDaemon(options = {}) {
   let allExhaustedNotified = false;
   // 内存状态：跟踪 limit_reached 标记（按帐号名）
   const limitReachedAt = new Map();
+  // refresh 失败的指数退避状态（按帐号名）
+  //   { nextAttemptAt: 下次允许尝试的时间戳, attempts: 已失败次数 }
+  const refreshBackoff = new Map();
 
   while (!shouldStop()) {
     let config;
@@ -147,20 +176,57 @@ export async function runDaemon(options = {}) {
 
     // v0.3 新增：主动续期临期 token（不依赖 ping 触发）
     // 防止用户离开期间 token 过期导致第二天要重新 /login
+    // v0.4 改进:
+    //   - 续期成功后，如果该帐号正是 Keychain active，同步写回 Keychain
+    //   - 失败时指数退避：1min → 2min → 4min → 8min → 16min → 30min(封顶)
+    //     避免连续 invalid_grant 时每分钟打废 Anthropic API，触发 IP 限流
+    //   - 用原子 updateConfig 避免和其他写入路径竞争
+    const nowForRefresh = Date.now();
     for (const a of config.accounts) {
       if (!a.credentials) continue;
       if (!isExpiringSoon(a.credentials, 30 * 60 * 1000)) continue; // 30 min 预警
+
+      // 退避检查
+      const backoff = refreshBackoff.get(a.name);
+      if (backoff && nowForRefresh < backoff.nextAttemptAt) continue;
+
       const tsIso = toCST(nowFn());
+      const oldAccessToken = a.credentials.accessToken;
       logFn(`[${tsIso}] proactive refresh: ${a.name} (expiring in <30min)`);
       try {
         const newCreds = await refreshAccessToken(a.credentials);
-        const { setCredentials, saveConfig } = await import('./config.js');
-        const updated = setCredentials(config, a.name, newCreds);
-        await saveConfig(updated);
-        config = updated;
+        // 原子写入 config，避免被 TUI / list / use 覆盖
+        await updateConfig((cfg) => setCredentials(cfg, a.name, newCreds));
+        a.credentials = newCreds;
+        refreshBackoff.delete(a.name); // 成功 → 清退避
         logFn(`[${tsIso}] proactive refresh ${a.name}: OK (next exp ${toCST(new Date(newCreds.expiresAt))})`);
+
+        // 同步写 Keychain（如果该账户正是 active）
+        if (keychainSupportedFn()) {
+          try {
+            const currentRaw = readKeychainRawFn();
+            if (currentRaw) {
+              const keychainCreds = parseClaudeCredentials(currentRaw);
+              if (keychainCreds.accessToken === oldAccessToken) {
+                const newRaw = serializeCredentials(newCreds, currentRaw);
+                writeKeychainRaw(newRaw);
+                logFn(`[${tsIso}] keychain synced for ${a.name} (active)`);
+              }
+            }
+          } catch (e) {
+            logFn(`[${tsIso}] keychain sync failed for ${a.name}: ${e?.message ?? e}`);
+          }
+        }
       } catch (err) {
-        logFn(`[${tsIso}] proactive refresh ${a.name}: FAIL ${err?.message ?? err}`);
+        // 指数退避：1min × 2^attempts，封顶 30min
+        const prev = refreshBackoff.get(a.name) ?? { attempts: 0 };
+        const attempts = prev.attempts + 1;
+        const delayMin = Math.min(30, Math.pow(2, attempts - 1));
+        refreshBackoff.set(a.name, {
+          nextAttemptAt: nowForRefresh + delayMin * 60_000,
+          attempts,
+        });
+        logFn(`[${tsIso}] proactive refresh ${a.name}: FAIL ${err?.message ?? err} (next retry in ${delayMin}min)`);
       }
     }
 

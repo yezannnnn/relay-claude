@@ -14,7 +14,7 @@ import {
   parseClaudeCredentials,
   serializeCredentials,
 } from '../keychain.js';
-import { loadConfig, saveConfig, setCredentials, setLastUsage } from '../config.js';
+import { loadConfig, setCredentials, setLastUsage, updateConfig } from '../config.js';
 import { refreshAccessToken, isExpiringSoon, queryUsage } from '../oauth.js';
 
 /** 在 config.accounts 中通过 accessToken 找帐号。 */
@@ -38,7 +38,7 @@ export default async function useCommand(args) {
     process.exit(1);
   }
 
-  let config = await loadConfig();
+  const config = await loadConfig();
   const target = config.accounts.find(a => a.name === targetName);
   if (!target) {
     console.error(`帐号 "${targetName}" 不存在`);
@@ -49,6 +49,10 @@ export default async function useCommand(args) {
     console.error('请运行: claude /logout && claude /login, 然后 interval-claude add ' + targetName + ' 重新捕获');
     process.exit(1);
   }
+
+  // 累积所有 config 修改，最后用 updateConfig 原子写入
+  // 避免和 daemon 续期等并发写入互相覆盖
+  const patches = [];
 
   // Step 1: 备份当前 Keychain
   const currentRaw = readKeychainRaw();
@@ -61,7 +65,7 @@ export default async function useCommand(args) {
           console.log(`Keychain 已经是 ${targetName} 的凭证`);
         } else {
           console.log(`备份当前 Keychain 到帐号: ${owner.name}`);
-          config = setCredentials(config, owner.name, currentParsed);
+          patches.push({ type: 'creds', name: owner.name, credentials: currentParsed });
         }
       } else {
         console.warn('⚠️  当前 Keychain 中的 token 不属于已配置帐号，已忽略备份');
@@ -77,7 +81,7 @@ export default async function useCommand(args) {
     console.log(`目标 token 即将过期，正在刷新...`);
     try {
       targetCreds = await refreshAccessToken(targetCreds);
-      config = setCredentials(config, targetName, targetCreds);
+      patches.push({ type: 'creds', name: targetName, credentials: targetCreds });
       console.log('✅ token 已刷新');
     } catch (err) {
       console.error(`token 刷新失败: ${err.message}`);
@@ -94,12 +98,22 @@ export default async function useCommand(args) {
   let usage = null;
   try {
     usage = await queryUsage(targetCreds.accessToken);
-    config = setLastUsage(config, targetName, usage);
+    patches.push({ type: 'usage', name: targetName, usage });
   } catch (err) {
     console.warn(`⚠️  usage 查询失败: ${err.message}`);
   }
 
-  await saveConfig(config);
+  // 原子写入所有累积的 patch
+  if (patches.length > 0) {
+    await updateConfig((cfg) => {
+      let next = cfg;
+      for (const p of patches) {
+        if (p.type === 'creds') next = setCredentials(next, p.name, p.credentials);
+        else if (p.type === 'usage') next = setLastUsage(next, p.name, p.usage);
+      }
+      return next;
+    });
+  }
 
   console.log(`✅ 已切换到 ${targetName}`);
   console.log(`   订阅: ${targetCreds.subscriptionType || '未知'}`);

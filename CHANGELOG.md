@@ -4,6 +4,27 @@
 
 ---
 
+## [0.4.1] — 2026-05-25
+
+### 修复
+- **🔴 严重 bug：race condition 导致 token chain 断裂** — TUI 5min 自动刷新 / 用户按 `r` 会做 `loadConfig → 改 → saveConfig`，过程中 daemon 同时也在写 config。TUI 用旧快照写回时，把 daemon 续期的新 token 覆盖回旧 token。下次 daemon 用废了的 refresh_token 调 API 返回 invalid_grant，所有账户雪崩。表现：第二天打开必须每个账户重新 `/login`。
+- **🔴 严重 bug：死循环 PING 浪费额度** — `usage` 查询失败（429 限流）时，daemon 写入的 placeholder window 被 TUI 的 race 覆盖。下个周期 daemon 又判定备用账户"未激活"，又 PING 一次，每分钟一次循环。单账户额度被白白消耗 10-20%。
+- **🔴 严重 bug：refresh 失败重试触发 IP 限流** — 之前 daemon refresh 失败后下个 60s 循环就重试，连续失败时每分钟打废 Anthropic API，触发 IP 级限流，导致所有账户的 usage 查询雪崩。
+- **🟡 切换震荡** — `usage` 查询失败时写入的 placeholder window utilization=0，被调度器误判为"满血账户"，可能被选作切换目标，切过去发现实际耗尽又切回。
+
+### 改进
+- **`updateConfig(updater)` 原子化写入接口** — 新增 `src/config.js`。所有写 config 的入口（daemon × 3、tui、list、add、remove、use 共 8 处）统一走此接口，每次都重新 `loadConfig` 拿最新版本再 patch，杜绝读旧写新覆盖。
+- **TUI 不再主动 refresh token** — TUI 改用 `queryUsage`（不 refresh），只读 usage，token 续期完全交给 daemon。TUI 失败时显示"待续期"而不是"失败"。
+- **daemon refresh 失败指数退避** — 1min → 2min → 4min → 8min → 16min → 30min（封顶）。避免连续 invalid_grant 时每分钟打废 API。
+- **placeholder 加 `isPlaceholder: true` 标记**，调度器对其健康度打 0.3 折扣，避免误选作切换目标。
+- **daemon 续期成功后同步写 Keychain**（如果该账户正是 active），避免 config 里是新 token、Keychain 里是旧 token。
+
+### 测试
+- 新增 `updateConfig` 单测 4 个（原子读改写、串行依赖、边界）
+- 总测试数 91 → 95，全部通过
+
+---
+
 ## [0.4.0] — 2026-05-25
 
 ### 新增

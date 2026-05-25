@@ -3,7 +3,7 @@
 // --refresh 强制实时查询 API
 // 当前 Keychain 活跃的帐号前缀 `*`
 
-import { loadConfig, saveConfig, getAccessToken, setLastUsage, setCredentials } from '../config.js';
+import { loadConfig, getAccessToken, setLastUsage, setCredentials, updateConfig } from '../config.js';
 import { isKeychainSupported, readKeychainRaw, parseClaudeCredentials } from '../keychain.js';
 import { queryUsageWithRefresh } from '../oauth.js';
 
@@ -18,6 +18,8 @@ export default async function listCommand(args) {
 
   if (refresh) {
     console.log('正在刷新所有帐号 usage...');
+    // 收集结果再原子写入，避免覆盖 daemon 的并发修改
+    const updates = [];
     for (const account of config.accounts) {
       if (!account.credentials) {
         console.log(`  ${account.name}: 跳过（v0.1 token 不支持 usage 查询）`);
@@ -25,17 +27,24 @@ export default async function listCommand(args) {
       }
       try {
         const { usage, credentials } = await queryUsageWithRefresh(account.credentials);
-        if (credentials.accessToken !== account.credentials.accessToken) {
-          config = setCredentials(config, account.name, credentials);
-        }
-        config = setLastUsage(config, account.name, usage);
+        updates.push({ name: account.name, usage, credentials });
       } catch (err) {
         console.warn(`  ${account.name}: ${err.message}`);
       }
     }
-    await saveConfig(config);
-    // 重新加载以拿最新数据
-    config = await loadConfig();
+    if (updates.length > 0) {
+      config = await updateConfig((cfg) => {
+        let next = cfg;
+        for (const { name, usage, credentials } of updates) {
+          const existing = next.accounts.find((a) => a.name === name);
+          if (existing?.credentials?.accessToken !== credentials.accessToken) {
+            next = setCredentials(next, name, credentials);
+          }
+          next = setLastUsage(next, name, usage);
+        }
+        return next;
+      });
+    }
   }
 
   // 识别当前 Keychain 活跃帐号

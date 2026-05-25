@@ -234,3 +234,65 @@ test('setLastUsage stores usage data on account', async () => {
   });
   assert.equal(cfg.accounts[0].last_usage.five_hour.utilization, 0.57);
 });
+
+test('updateConfig: 原子读改写，updater 收到当前最新 config', async () => {
+  const { saveConfig, updateConfig, setLastUsage } = await freshModule();
+  await saveConfig({
+    interval_minutes: 100,
+    ping_prompt: 'hi',
+    accounts: [
+      { name: 'A', credentials: { accessToken: 'aa' }, offset_minutes: 0 },
+    ],
+  });
+  const result = await updateConfig((cfg) => {
+    assert.equal(cfg.accounts[0].name, 'A', 'updater 应该看到最新 config');
+    return setLastUsage(cfg, 'A', {
+      five_hour: { utilization: 0.3, resets_at: '2026-05-23T19:00:00Z' },
+    });
+  });
+  assert.equal(result.accounts[0].last_usage.five_hour.utilization, 0.3);
+});
+
+test('updateConfig: 串行调用，第二次 updater 看到第一次的结果', async () => {
+  const { saveConfig, updateConfig, loadConfig, setLastUsage } = await freshModule();
+  await saveConfig({
+    interval_minutes: 100,
+    ping_prompt: 'hi',
+    accounts: [
+      { name: 'A', credentials: { accessToken: 'aa' }, offset_minutes: 0 },
+    ],
+  });
+  // 第一次更新写入 utilization=0.2
+  await updateConfig((cfg) =>
+    setLastUsage(cfg, 'A', {
+      five_hour: { utilization: 0.2, resets_at: '2026-05-23T19:00:00Z' },
+    }),
+  );
+  // 第二次更新基于第一次结果再 patch
+  await updateConfig((cfg) => {
+    assert.equal(
+      cfg.accounts[0].last_usage.five_hour.utilization,
+      0.2,
+      '第二次 updater 应看到第一次的结果',
+    );
+    return setLastUsage(cfg, 'A', {
+      five_hour: { utilization: 0.5, resets_at: '2026-05-23T19:00:00Z' },
+    });
+  });
+  const after = await loadConfig();
+  assert.equal(after.accounts[0].last_usage.five_hour.utilization, 0.5);
+});
+
+test('updateConfig: updater 返回非对象抛错', async () => {
+  const { saveConfig, updateConfig } = await freshModule();
+  await saveConfig({ interval_minutes: 100, ping_prompt: 'hi', accounts: [] });
+  await assert.rejects(
+    () => updateConfig(() => null),
+    /必须返回新 config 对象/,
+  );
+});
+
+test('updateConfig: 非函数 updater 抛错', async () => {
+  const { updateConfig } = await freshModule();
+  await assert.rejects(() => updateConfig('not a function'), /必须是函数/);
+});
