@@ -1,8 +1,8 @@
-# claude-relay
+# relay-claude
 
 > 多账户 Claude Code 额度接力 —— 错峰激活 5 小时窗口，全天不断额。
 
-每个 Claude 账户有一个 **5 小时滚动使用窗口**。三个账户按 100 分钟错峰激活，窗口依次重叠，可以覆盖完整工作日。claude-relay 全程自动完成：定时 ping 各账户触发窗口、实时评估账户健康度、主账户用完立刻切换 Keychain 凭证——所有终端的 `claude` 命令同步生效。
+每个 Claude 账户有一个 **5 小时滚动使用窗口**。三个账户按 100 分钟错峰激活，窗口依次重叠，可以覆盖完整工作日。relay-claude 全程自动完成：定时 ping 各账户触发窗口、实时评估账户健康度、主账户用完立刻切换 Keychain 凭证——所有终端的 `claude` 命令同步生效。
 
 **当前仅支持 macOS**（依赖 Keychain）。Linux / Windows 支持计划中。
 
@@ -29,14 +29,14 @@
 ### npm（推荐）
 
 ```bash
-npm install -g claude-relay
+npm install -g relay-claude
 ```
 
 ### 从源码
 
 ```bash
-git clone https://github.com/yezannnnn/claude-relay.git
-cd claude-relay
+git clone https://github.com/yezannnnn/relay-claude.git
+cd relay-claude
 npm link
 ```
 
@@ -52,8 +52,8 @@ npm link
 # 先登录账户 A
 claude /logout && claude /login
 
-# claude-relay 自动读取 Keychain 捕获凭证
-claude-relay add primary
+# relay-claude 自动读取 Keychain 捕获凭证
+relay-claude add primary
 # 显示：订阅类型 + 5h 用量 + 邮箱
 ```
 
@@ -61,23 +61,23 @@ claude-relay add primary
 
 ```bash
 claude /logout && claude /login
-claude-relay add secondary
+relay-claude add secondary
 
 claude /logout && claude /login
-claude-relay add tertiary
+relay-claude add tertiary
 ```
 
 或使用**交互式批量模式**：
 
 ```bash
-claude-relay add    # 逐个引导添加
+relay-claude add    # 逐个引导添加
 ```
 
 ### 2. 查看所有账户
 
 ```bash
-claude-relay list             # 读本地缓存（快）
-claude-relay list --refresh   # 实时查 API
+relay-claude list             # 读本地缓存（快）
+relay-claude list --refresh   # 实时查 API
 ```
 
 ```
@@ -93,7 +93,7 @@ NAME       SUB     5H 用量   重置      7天    状态
 ### 3. 启动守护进程
 
 ```bash
-claude-relay start
+relay-claude start
 # ✅ 守护进程已启动 (pid=12345)
 # 日志写入 ~/.intervalClaude/daemon.log
 ```
@@ -101,7 +101,7 @@ claude-relay start
 ### 4. 实时仪表盘
 
 ```bash
-claude-relay tui
+relay-claude tui
 ```
 
 ```
@@ -126,7 +126,7 @@ intervalClaude    18:42:57    上次刷新: 18:42:00    Daemon: ● 运行中 (u
 ### 5. 手动切换账户
 
 ```bash
-claude-relay use secondary
+relay-claude use secondary
 # ✅ 已切换到 secondary（Pro，剩余 88%，4h32m 后重置）
 ```
 
@@ -135,7 +135,7 @@ claude-relay use secondary
 ### 6. 停止守护进程
 
 ```bash
-claude-relay stop
+relay-claude stop
 ```
 
 ---

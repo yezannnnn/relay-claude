@@ -16,7 +16,7 @@
 - **TUI 60 秒自动刷新** — 打开即自动拉取所有帐号最新 usage，每 60 秒轮询一次，无需手动按 `r`
 - **TUI 调度策略面板** — 显示当前活跃帐号、下一切换候选、预 ping 阈值、错峰间隔
 - **系统通知** — 帐号切换、全部耗尽时发送 macOS 系统通知（可通过 `scheduler.notify: false` 关闭）
-- **包名更名为 `claude-relay`**，新增 `claude-relay` 命令别名（保留 `interval-claude` 向后兼容）
+- **包名更名为 `relay-claude`**，新增 `relay-claude` 命令别名（保留 `interval-claude` 向后兼容）
 
 ### 改进
 - Ping 默认使用 `--model haiku`，最小化 ping 操作对额度的消耗

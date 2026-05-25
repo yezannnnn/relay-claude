@@ -1,10 +1,10 @@
 {
-  "name": "claude-relay",
+  "name": "relay-claude",
   "version": "0.3.0",
   "description": "Stagger multiple Claude Code accounts to extend your daily quota beyond the 5-hour limit",
   "type": "module",
   "bin": {
-    "claude-relay": "./bin/interval-claude",
+    "relay-claude": "./bin/interval-claude",
     "interval-claude": "./bin/interval-claude"
   },
   "main": "./src/cli.js",
@@ -42,11 +42,11 @@
   "author": "yezannnnn",
   "repository": {
     "type": "git",
-    "url": "https://github.com/yezannnnn/claude-relay.git"
+    "url": "https://github.com/yezannnnn/relay-claude.git"
   },
-  "homepage": "https://github.com/yezannnnn/claude-relay#readme",
+  "homepage": "https://github.com/yezannnnn/relay-claude#readme",
   "bugs": {
-    "url": "https://github.com/yezannnnn/claude-relay/issues"
+    "url": "https://github.com/yezannnnn/relay-claude/issues"
   },
   "devDependencies": {
     "conventional-changelog-cli": "^5.0.0"

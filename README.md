@@ -1,10 +1,10 @@
-# claude-relay
+# relay-claude
 
 > Stagger multiple Claude Code accounts to extend your daily quota beyond the 5-hour limit.
 
 [中文文档](./README.zh-CN.md) · [Changelog](./CHANGELOG.md)
 
-Each Claude account has a **5-hour rolling usage window**. With 3 accounts staggered 100 minutes apart, you get overlapping windows that cover an 8–9 hour workday. interval-claude automates this — pinging accounts to open their windows at the right time, scoring account health in real-time, and switching Keychain credentials the moment your active account runs out.
+Each Claude account has a **5-hour rolling usage window**. With 3 accounts staggered 100 minutes apart, you get overlapping windows that cover an 8–9 hour workday. relay-claude automates this — pinging accounts to open their windows at the right time, scoring account health in real-time, and switching Keychain credentials the moment your active account runs out.
 
 **macOS only** (depends on Keychain). Linux/Windows planned.
 
@@ -30,14 +30,14 @@ The daemon sends `claude -p "hi" --model haiku` (cheapest possible) to each acco
 ### npm (recommended)
 
 ```bash
-npm install -g claude-relay
+npm install -g relay-claude
 ```
 
 ### From source
 
 ```bash
-git clone https://github.com/yezannnn/claude-relay.git
-cd claude-relay
+git clone https://github.com/yezannnn/relay-claude.git
+cd relay-claude
 npm link
 ```
 
@@ -54,7 +54,7 @@ No runtime dependencies — only Node.js built-ins.
 # Log in to account A first
 claude /logout && claude /login
 
-interval-claude add primary
+relay-claude add primary
 # → reads Keychain, verifies token, shows subscription + usage
 ```
 
@@ -62,23 +62,23 @@ Repeat for each account (log out, log in, then `add`):
 
 ```bash
 claude /logout && claude /login
-interval-claude add secondary
+relay-claude add secondary
 
 claude /logout && claude /login
-interval-claude add tertiary
+relay-claude add tertiary
 ```
 
 Or use interactive batch mode:
 
 ```bash
-interval-claude add    # prompts for each account one by one
+relay-claude add    # prompts for each account one by one
 ```
 
 ### 2. Check status
 
 ```bash
-interval-claude list           # cached usage (instant)
-interval-claude list --refresh # live API query
+relay-claude list           # cached usage (instant)
+relay-claude list --refresh # live API query
 ```
 
 ```
@@ -94,7 +94,7 @@ NAME       SUB     5H USAGE  RESETS     7D    STATUS
 ### 3. Start the daemon
 
 ```bash
-interval-claude start
+relay-claude start
 # ✅ Daemon started (pid=12345)
 # Logs → ~/.intervalClaude/daemon.log
 ```
@@ -102,7 +102,7 @@ interval-claude start
 ### 4. Live dashboard
 
 ```bash
-interval-claude tui
+relay-claude tui
 ```
 
 ```
@@ -127,7 +127,7 @@ Dashboard auto-refreshes usage from API every **60 seconds**. Press `r` to force
 ### 5. Manual account switch
 
 ```bash
-interval-claude use secondary
+relay-claude use secondary
 # ✅ Switched to secondary (Pro, 88% remaining, resets in 4h32m)
 ```
 
@@ -136,7 +136,7 @@ interval-claude use secondary
 ### 6. Stop the daemon
 
 ```bash
-interval-claude stop
+relay-claude stop
 ```
 
 ---
