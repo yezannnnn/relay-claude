@@ -1,7 +1,7 @@
 // ASCII banner — 打印于 help / version / start 等入口
 // 同时作为版本号单一来源（避免多处硬编码）
 
-export const VERSION = '0.4.1';
+export const VERSION = '0.4.2';
 
 const C = {
   reset: '\x1b[0m',

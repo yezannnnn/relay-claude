@@ -64,17 +64,21 @@ export default async function listCommand(args) {
 }
 
 function formatTable(config, activeAccessToken) {
-  const headers = ['NAME', 'SUB', '5H USE', 'RESETS', '7D USE', 'STATUS'];
+  const headers = ['NAME', 'EMAIL', 'SUB', '5H USE', 'RESETS', '7D USE', 'STATUS'];
   const rows = [];
   for (const a of config.accounts) {
     const isActive = activeAccessToken && getAccessToken(a) === activeAccessToken;
     const name = (isActive ? '* ' : '  ') + a.name;
+    const email = a.credentials?.email ?? '-';
     const sub = a.credentials?.subscriptionType ?? (a.legacy_token ? 'v0.1' : '-');
     const fiveH = formatUtil(a.last_usage?.five_hour);
-    const resets = formatTimeUntil(a.last_usage?.five_hour?.resets_at);
+    const sevenDayFull = (a.last_usage?.seven_day?.utilization ?? 0) >= 1.0;
+    const resets = sevenDayFull
+      ? `7D:${formatTimeUntil(a.last_usage?.seven_day?.resets_at)}`
+      : formatTimeUntil(a.last_usage?.five_hour?.resets_at);
     const sevenD = formatUtil(a.last_usage?.seven_day);
     const status = formatStatus(a.last_usage?.five_hour);
-    rows.push([name, sub, fiveH, resets, sevenD, status]);
+    rows.push([name, email, sub, fiveH, resets, sevenD, status]);
   }
 
   const widths = headers.map((h, i) => Math.max(

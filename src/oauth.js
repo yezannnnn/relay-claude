@@ -144,7 +144,10 @@ export async function queryUsage(accessToken, options = {}) {
 
 function normalizeUtilization(v) {
   if (v == null) return null;
-  return v > 1 ? v / 100 : v;
+  // API returns percentage floats (e.g. 17.0 = 17%, 1.0 = 1%).
+  // Values in [0, 1) are already decimal (0.0 = 0%); exactly 1.0 is also
+  // a percentage (1%), so we divide at >= 1, not > 1.
+  return v >= 1 ? v / 100 : v;
 }
 
 /** 查询帐号邮箱 / 用户名（用于 TUI 展示）。返回 { email, fullName } 或 null。 */

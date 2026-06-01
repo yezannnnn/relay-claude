@@ -7,6 +7,7 @@
 //   - 批量 ping 走顺序模式，因为 claude CLI 内部可能有共享状态/认证缓存
 
 import { spawn as defaultSpawn } from 'node:child_process';
+import os from 'node:os';
 import { getAccessToken } from './config.js';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -91,6 +92,7 @@ export async function pingAccount(account, prompt, options = {}) {
         env: childEnv,
         stdio: ['ignore', 'pipe', 'pipe'],
         timeout: timeoutMs,
+        cwd: os.homedir(),
       });
     } catch (err) {
       resolve({

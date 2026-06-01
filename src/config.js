@@ -12,6 +12,10 @@ import os from 'node:os';
 
 const DIR_NAME = '.intervalClaude';
 const CONFIG_FILE = 'config.json';
+const LOCK_FILE = 'config.lock';
+const LOCK_TIMEOUT_MS = 5000;
+const LOCK_STALE_MS = 15000;
+const LOCK_POLL_MS = 20;
 
 const DEFAULT_SCHEDULER = Object.freeze({
   enabled: true,
@@ -50,6 +54,54 @@ export function getConfigDir() {
 /** config.json 完整路径 */
 export function getConfigPath() {
   return path.join(getConfigDir(), CONFIG_FILE);
+}
+
+function getLockPath() {
+  return path.join(getConfigDir(), LOCK_FILE);
+}
+
+/**
+ * 原子创建锁文件（O_EXCL）。
+ * - 自动清理超过 LOCK_STALE_MS 的过期锁
+ * - 超时 LOCK_TIMEOUT_MS 后抛错
+ */
+async function acquireLock() {
+  const lockPath = getLockPath();
+  const deadline = Date.now() + LOCK_TIMEOUT_MS;
+
+  while (Date.now() < deadline) {
+    try {
+      // 'wx' = O_WRONLY | O_CREAT | O_EXCL — 原子操作，文件已存在时抛 EEXIST
+      const fh = await fs.open(lockPath, 'wx');
+      await fh.writeFile(String(process.pid));
+      await fh.close();
+      return lockPath;
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err;
+
+      // 检查锁是否过期（持锁进程已崩溃）
+      try {
+        const stat = await fs.stat(lockPath);
+        if (Date.now() - stat.mtimeMs > LOCK_STALE_MS) {
+          await fs.unlink(lockPath).catch(() => {});
+          continue;
+        }
+      } catch {
+        // 锁文件在 stat 前消失，立即重试
+        continue;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, LOCK_POLL_MS));
+    }
+  }
+
+  throw new Error(
+    `updateConfig: 获取文件锁超时 (${LOCK_TIMEOUT_MS}ms) — 检查是否有僵尸进程持有 ${lockPath}`
+  );
+}
+
+async function releaseLock(lockPath) {
+  await fs.unlink(lockPath).catch(() => {});
 }
 
 /**
@@ -146,42 +198,51 @@ export async function saveConfig(config) {
   await fs.mkdir(dir, { recursive: true, mode: 0o700 });
 
   const json = JSON.stringify(config, null, 2);
-  // 显式指定 mode，避免新建时受 umask 影响
-  await fs.writeFile(configPath, json, { encoding: 'utf8', mode: 0o600 });
-  // 已存在的文件不会被 writeFile 的 mode 覆盖权限，显式 chmod 一次
+  // 写入临时文件再 rename，保证写操作原子性（不会出现部分写入的损坏文件）
+  const tmpPath = `${configPath}.tmp.${process.pid}`;
+  await fs.writeFile(tmpPath, json, { encoding: 'utf8', mode: 0o600 });
   try {
-    await fs.chmod(configPath, 0o600);
+    await fs.chmod(tmpPath, 0o600);
   } catch (err) {
-    // Windows 上 chmod 是 no-op，忽略 EPERM/ENOSYS 之类的差异
-    if (process.platform !== 'win32') {
-      throw err;
-    }
+    if (process.platform !== 'win32') throw err;
+  }
+  try {
+    // POSIX rename 是原子操作 — 目标文件被瞬间替换
+    await fs.rename(tmpPath, configPath);
+  } catch (err) {
+    await fs.unlink(tmpPath).catch(() => {});
+    throw err;
   }
 }
 
 /**
- * 原子化更新 config（避免 read-modify-write 竞争）。
+ * 跨进程安全的原子更新 config。
  *
  * 用法：
  *   await updateConfig((cfg) => setLastUsage(cfg, 'A', usage));
  *
- * 关键点：每次都重新 loadConfig，确保拿到最新版本，再 patch 后写回。
- * 这样即使多个调用方并发，最终所有人的修改都基于最新状态串行化。
- *
- * 注意：这只解决"进程内 race"和"不同代码路径互相覆盖"，不解决跨进程并发
- * 写同一个 config 文件的 race。后者需要文件锁，当前规模下不需要。
+ * 通过文件锁（O_EXCL）保证同一时刻只有一个进程（或异步上下文）执行
+ * read-modify-write，解决 TUI 和 Daemon 并发写导致的数据覆盖问题。
+ * saveConfig 内部使用 tmp+rename 保证写操作本身的原子性。
  */
 export async function updateConfig(updater) {
   if (typeof updater !== 'function') {
     throw new Error('updateConfig: updater 必须是函数');
   }
-  const current = await loadConfig();
-  const next = updater(current);
-  if (!next || typeof next !== 'object') {
-    throw new Error('updateConfig: updater 必须返回新 config 对象');
+  // 确保目录存在，以便锁文件可以创建
+  await fs.mkdir(getConfigDir(), { recursive: true, mode: 0o700 });
+  const lockPath = await acquireLock();
+  try {
+    const current = await loadConfig();
+    const next = updater(current);
+    if (!next || typeof next !== 'object') {
+      throw new Error('updateConfig: updater 必须返回新 config 对象');
+    }
+    await saveConfig(next);
+    return next;
+  } finally {
+    await releaseLock(lockPath);
   }
-  await saveConfig(next);
-  return next;
 }
 
 /**

@@ -306,7 +306,14 @@ export default async function tuiCommand() {
       const usageBar = fmtUsageBar(a.last_usage?.five_hour, cols[2].width);
       const sevenD = padRight(fmtUtil(a.last_usage?.seven_day), cols[3].width);
       const next = padRight(fmtNextPing(a, daemonCache, configCache, activeAcc, nowMs), cols[4].width);
-      const resets = padRight(fmtTimeUntil(a.last_usage?.five_hour?.resets_at), cols[5].width);
+      const sevenDayFull = (a.last_usage?.seven_day?.utilization ?? 0) >= 1.0;
+      const resetsIso = sevenDayFull
+        ? a.last_usage?.seven_day?.resets_at
+        : a.last_usage?.five_hour?.resets_at;
+      const resetsStr = sevenDayFull
+        ? `7D:${fmtTimeUntil(resetsIso)}`
+        : fmtTimeUntil(resetsIso);
+      const resets = padRight(resetsStr, cols[5].width);
       const hScore = padRight(String(a._health ?? 0), cols[6].width);
       const stateLabel = padRight(fmtStateLabel(a, isActive, nowMs), cols[7].width);
 
@@ -418,8 +425,9 @@ function fmtNextPing(account, status, configCache, activeAcc, nowMs) {
   if (u?.resets_at && new Date(u.resets_at).getTime() > nowMs) {
     return '-';
   }
-  // 已耗尽：等待重置，无法预 ping
+  // 已耗尽（5H 或 7D）：等待重置，无法预 ping
   if (u && (u.utilization ?? 0) >= 1.0) return '-';
+  if ((account.last_usage?.seven_day?.utilization ?? 0) >= 1.0) return '-';
 
   // 未激活：预估下次预 ping 时间
   if (!activeAcc || !configCache || !status?.running) return '-';
@@ -440,6 +448,7 @@ function fmtNextPing(account, status, configCache, activeAcc, nowMs) {
     .filter(
       (a) =>
         a !== activeAcc &&
+        (a.last_usage?.seven_day?.utilization ?? 0) < 1.0 &&
         !(
           a.last_usage?.five_hour?.resets_at &&
           new Date(a.last_usage.five_hour.resets_at).getTime() > nowMs
@@ -487,6 +496,7 @@ function fmtNextPing(account, status, configCache, activeAcc, nowMs) {
 
 function fmtStateLabel(account, isActive, nowMs) {
   if (isActive) return '🟢 活跃';
+  if ((account.last_usage?.seven_day?.utilization ?? 0) >= 1.0) return '🔴 耗尽';
   const u = account.last_usage?.five_hour;
   if (u && u.utilization >= 1.0) return '🔴 耗尽';
   const resetsAtMs = u?.resets_at ? new Date(u.resets_at).getTime() : null;

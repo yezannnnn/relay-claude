@@ -296,3 +296,45 @@ test('updateConfig: 非函数 updater 抛错', async () => {
   const { updateConfig } = await freshModule();
   await assert.rejects(() => updateConfig('not a function'), /必须是函数/);
 });
+
+test('updateConfig: 并发写入串行化，两个账户的修改都保留', async () => {
+  const { saveConfig, updateConfig, loadConfig, setLastUsage } = await freshModule();
+  await saveConfig({
+    interval_minutes: 100,
+    ping_prompt: 'hi',
+    accounts: [
+      { name: 'A', credentials: { accessToken: 'aa' }, offset_minutes: 0 },
+      { name: 'B', credentials: { accessToken: 'bb' }, offset_minutes: 0 },
+    ],
+  });
+
+  // 并发调用 — 无锁时后写者会覆盖前写者对另一账户的修改
+  await Promise.all([
+    updateConfig((cfg) => setLastUsage(cfg, 'A', { five_hour: { utilization: 0.3 } })),
+    updateConfig((cfg) => setLastUsage(cfg, 'B', { five_hour: { utilization: 0.7 } })),
+  ]);
+
+  const final = await loadConfig();
+  const aAcc = final.accounts.find((a) => a.name === 'A');
+  const bAcc = final.accounts.find((a) => a.name === 'B');
+  assert.equal(aAcc?.last_usage?.five_hour?.utilization, 0.3, 'A 的更新应被保留');
+  assert.equal(bAcc?.last_usage?.five_hour?.utilization, 0.7, 'B 的更新应被保留');
+});
+
+test('updateConfig: 过期锁文件自动清理后正常执行', async () => {
+  const { saveConfig, updateConfig } = await freshModule();
+  await saveConfig({ interval_minutes: 100, ping_prompt: 'hi', accounts: [] });
+
+  // 写入一个过期锁文件（mtime 设为 20 秒前，超过 LOCK_STALE_MS=15s）
+  const lockPath = path.join(tmpHome, 'config.lock');
+  await fs.writeFile(lockPath, '99999');
+  const staleTime = new Date(Date.now() - 20000);
+  await fs.utimes(lockPath, staleTime, staleTime);
+
+  // 应自动清理过期锁并成功执行
+  const result = await updateConfig((cfg) => ({ ...cfg, ping_prompt: 'cleaned' }));
+  assert.equal(result.ping_prompt, 'cleaned');
+
+  // 锁文件执行后应被清理
+  await assert.rejects(fs.stat(lockPath), { code: 'ENOENT' }, '锁文件应在完成后被删除');
+});

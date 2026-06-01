@@ -13,6 +13,7 @@
 //   - sleep 可中断 — shouldStop=true 时秒级响应，不等满 60s
 
 import { spawn } from 'node:child_process';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -151,6 +152,11 @@ export async function runDaemon(options = {}) {
   // refresh 失败的指数退避状态（按帐号名）
   //   { nextAttemptAt: 下次允许尝试的时间戳, attempts: 已失败次数 }
   const refreshBackoff = new Map();
+  // 🛡️ PING 防滥用：记录每个账户最近一次 PING 时间戳（按帐号名）
+  // 同一账户在 MIN_PING_INTERVAL_MS 内不允许重复 PING，无视调度算法
+  // 这是兜底保护，防止任何 bug 导致额度被反复 PING 消耗
+  const lastPingedAt = new Map();
+  const MIN_PING_INTERVAL_MS = 10 * 60 * 1000; // 10 分钟硬隔离
 
   while (!shouldStop()) {
     let config;
@@ -342,10 +348,14 @@ export async function runDaemon(options = {}) {
           await performUseFromDaemon(target.name);
           if (config.scheduler?.notify !== false) {
             const fromName = active?.name ?? '上一个帐号';
+            const targetUsage = target.last_usage?.five_hour;
+            const usagePct = targetUsage?.utilization != null
+              ? `${Math.round(targetUsage.utilization * 100)}%`
+              : '未知';
             await dispatchNotification({
-              title: 'relay-claude',
-              subtitle: '已切换帐号',
-              message: `${fromName} → ${target.name}`,
+              title: 'relay-claude · 已切换帐号',
+              subtitle: `${fromName} → ${target.name}`,
+              message: `当前编程将使用 ${target.name} 额度（已用 ${usagePct}）`,
             });
           }
           allExhaustedNotified = false;
@@ -450,6 +460,7 @@ export async function startDaemon() {
     detached: true,
     stdio: 'ignore',
     env: process.env,
+    cwd: os.homedir(),
   });
 
   // 让父进程能独立退出

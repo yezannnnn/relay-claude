@@ -1,6 +1,6 @@
 {
   "name": "relay-claude",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Stagger multiple Claude Code accounts to extend your daily quota beyond the 5-hour limit",
   "type": "module",
   "bin": {

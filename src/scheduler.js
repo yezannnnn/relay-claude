@@ -48,6 +48,8 @@ function windowRemainingMin(account, now) {
 }
 
 function currentUsage(account) {
+  // 7D 满了视为完全耗尽，不管 5H 还剩多少
+  if ((account?.last_usage?.seven_day?.utilization ?? 0) >= 1.0) return 1.0;
   return account?.last_usage?.five_hour?.utilization ?? 0;
 }
 
@@ -64,6 +66,8 @@ export const PLACEHOLDER_HEALTH_FACTOR = 0.3;
 
 export function health(account, cfg, now = Date.now()) {
   if (!account) return 0;
+  // 7D 满了直接 0，无论窗口状态如何
+  if ((account?.last_usage?.seven_day?.utilization ?? 0) >= 1.0) return 0;
   const weight = subWeight(account, cfg);
 
   if (isWindowNotStarted(account)) {
@@ -144,7 +148,7 @@ export function shouldPrePing(accounts, active, cfg, now = Date.now()) {
   if (N <= 1) return null;
 
   const dormant = accounts
-    .filter((a) => a.name !== active.name && isWindowNotStarted(a))
+    .filter((a) => a.name !== active.name && (isWindowNotStarted(a) || isWindowExpired(a, now)) && currentUsage(a) < 1.0)
     .sort((a, b) => health(b, cfg, now) - health(a, cfg, now));
   if (dormant.length === 0) return null;
 
