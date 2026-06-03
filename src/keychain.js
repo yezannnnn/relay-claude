@@ -81,22 +81,30 @@ export function parseClaudeCredentials(rawJson) {
 }
 
 /**
- * Serialize credentials back to Keychain JSON shape (preserves mcpOAuth from original).
+ * Serialize credentials back to Keychain JSON shape.
+ *
+ * 关键：保留 originalRaw 的所有顶层字段（trustedDeviceToken / mcpOAuth /
+ * 未来 Claude CLI 新增的其它字段），只覆盖 claudeAiOauth。
+ *
+ * 历史教训：v0.5 之前只 preserve mcpOAuth，导致每次 use 切换 / proactive
+ * refresh / Keychain sync 都把 trustedDeviceToken 抹掉 → Claude CLI 视为
+ * 未授信设备 → 弹 "Please run /login"。
+ *
  * @param {Object} credentials
  * @param {string|null} originalRaw
  * @returns {string}
  */
 export function serializeCredentials(credentials, originalRaw = null) {
-  let preserved = {};
+  let base = {};
   if (originalRaw) {
     try {
-      const parsed = JSON.parse(originalRaw);
-      if (parsed.mcpOAuth) preserved.mcpOAuth = parsed.mcpOAuth;
+      base = JSON.parse(originalRaw);
     } catch {
-      // ignore
+      // 原 raw 解析失败：从零构造，只能保证 claudeAiOauth 字段正确
     }
   }
   return JSON.stringify({
+    ...base,
     claudeAiOauth: {
       accessToken: credentials.accessToken,
       refreshToken: credentials.refreshToken,
@@ -105,7 +113,6 @@ export function serializeCredentials(credentials, originalRaw = null) {
       subscriptionType: credentials.subscriptionType,
       rateLimitTier: credentials.rateLimitTier,
     },
-    ...preserved,
   });
 }
 

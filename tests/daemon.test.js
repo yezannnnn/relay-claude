@@ -147,57 +147,38 @@ test('runDaemon: ping 成功后 last_pings 被写入', async () => {
   );
 });
 
-test('runDaemon: 单帐号 ping 失败不影响其他帐号', async () => {
+test('runDaemon: ping 抛错时 daemon 不崩溃，且不写入 last_pings', async () => {
+  // v0.3 调度器基于 health 选最优账户，不做轮询。
+  // 本测试验证：调度器选中某账户后 pingFn 抛错，daemon 捕获并继续，
+  // 不写入 last_pings，不崩溃整个进程。
   const config = [
     { name: 'primary', token: 't1', offset_minutes: 0 },
-    { name: 'secondary', token: 't2', offset_minutes: 100 },
-    { name: 'tertiary', token: 't3', offset_minutes: 200 },
   ];
   await saveTestConfig(config);
 
   const T0 = new Date('2026-05-23T09:00:00.000Z');
-  // 启动很久前 → 三个帐号都该 ping
-  const startedAt = plusMin(T0, -300);
-  await saveTestState(1234, startedAt.toISOString());
+  await saveTestState(1234, T0.toISOString());
 
-  const pingResults = {};
   const { runDaemon } = await freshModule();
 
-  let callCount = 0;
+  let pingDone = false;
   await runDaemon({
     keychainSupportedFn: () => false,
     checkIntervalMs: 50,
-    shouldStop: () => callCount >= 3, // 三个帐号都 ping 后退出
+    shouldStop: () => pingDone,
     pingFn: async (account) => {
-      callCount++;
-      pingResults[account.name] = callCount;
-
-      // secondary 抛错，其他成功
-      if (account.name === 'secondary') {
-        throw new Error('secondary ping failed');
-      }
-      return { success: true };
+      pingDone = true;
+      throw new Error(`${account.name} ping failed intentionally`);
     },
     nowFn: () => T0,
   });
 
-  // 检查 last_pings：primary 和 tertiary 应该有，secondary 应该没有
+  // ping 失败 → last_pings 不应写入；daemon 不应崩溃（能跑到这里即证明）
   const { loadState } = await import('../src/state.js');
   const state = await loadState();
   assert.ok(
-    state.last_pings.primary,
-    'primary 应该被 ping 成功，但 last_pings.primary = ' +
-      state.last_pings.primary
-  );
-  assert.ok(
-    !state.last_pings.secondary,
-    'secondary 应该 ping 失败，但 last_pings.secondary = ' +
-      state.last_pings.secondary
-  );
-  assert.ok(
-    state.last_pings.tertiary,
-    'tertiary 应该被 ping 成功，但 last_pings.tertiary = ' +
-      state.last_pings.tertiary
+    !state.last_pings.primary,
+    'ping 异常后 last_pings.primary 不应被写入，实际 = ' + state.last_pings.primary,
   );
 });
 
@@ -357,4 +338,99 @@ test('runDaemon: 读取配置失败时继续循环不崩溃', async () => {
 
   // 应该没有错误抛出，主循环继续
   assert.ok(logCount >= 2, '应该有日志输出');
+});
+
+test('runDaemon: usage polling round-robin 轮询所有账户', async () => {
+  // 4 个账户 + 4 轮循环 → 每个账户被查询一次
+  const config = [
+    {
+      name: 'A',
+      credentials: { accessToken: 'a1', refreshToken: 'r1', expiresAt: Date.now() + 86400000, subscriptionType: 'pro' },
+      offset_minutes: 0,
+    },
+    {
+      name: 'B',
+      credentials: { accessToken: 'b1', refreshToken: 'r2', expiresAt: Date.now() + 86400000, subscriptionType: 'pro' },
+      offset_minutes: 0,
+    },
+    {
+      name: 'C',
+      credentials: { accessToken: 'c1', refreshToken: 'r3', expiresAt: Date.now() + 86400000, subscriptionType: 'pro' },
+      offset_minutes: 0,
+    },
+    {
+      name: 'D',
+      credentials: { accessToken: 'd1', refreshToken: 'r4', expiresAt: Date.now() + 86400000, subscriptionType: 'pro' },
+      offset_minutes: 0,
+    },
+  ];
+  await saveTestConfig(config);
+
+  const polled = [];
+  const { runDaemon } = await freshModule();
+
+  await runDaemon({
+    keychainSupportedFn: () => false,
+    checkIntervalMs: 5,
+    // 直接按 poll 次数停止：shouldStop 在每次迭代内被调用 3-4 次，
+    // 用 cycle 计数会提前触发，改为等 4 个账户全部轮询完再退出
+    shouldStop: () => polled.length >= 4,
+    useAccountFn: async () => {},
+    queryUsageWithRefreshFn: async (creds) => {
+      polled.push(creds.accessToken);
+      return {
+        usage: {
+          five_hour: { utilization: 0.1, resets_at: new Date(Date.now() + 5 * 3600 * 1000).toISOString() },
+          seven_day: { utilization: 0.05, resets_at: new Date(Date.now() + 7 * 86400 * 1000).toISOString() },
+          fetched_at: new Date().toISOString(),
+        },
+        credentials: creds,
+      };
+    },
+    pingFn: async () => ({ success: false }),
+  });
+
+  // 4 轮应该轮询过 4 个账户（顺序：a1, b1, c1, d1）
+  assert.deepEqual(polled, ['a1', 'b1', 'c1', 'd1'], 'round-robin 应该按配置顺序轮询每个账户一次');
+});
+
+test('runDaemon: usage polling 跳过 7D 已满账户', async () => {
+  const config = [
+    {
+      name: 'A',
+      credentials: { accessToken: 'a1', refreshToken: 'r1', expiresAt: Date.now() + 86400000, subscriptionType: 'pro' },
+      last_usage: {
+        seven_day: { utilization: 1.0, resets_at: new Date(Date.now() + 3600000).toISOString() }, // 7D 满了
+      },
+      offset_minutes: 0,
+    },
+    {
+      name: 'B',
+      credentials: { accessToken: 'b1', refreshToken: 'r2', expiresAt: Date.now() + 86400000, subscriptionType: 'pro' },
+      offset_minutes: 0,
+    },
+  ];
+  await saveTestConfig(config);
+
+  const polled = [];
+  const { runDaemon } = await freshModule();
+
+  await runDaemon({
+    keychainSupportedFn: () => false,
+    checkIntervalMs: 5,
+    shouldStop: () => polled.length >= 2,
+    useAccountFn: async () => {},
+    queryUsageWithRefreshFn: async (creds) => {
+      polled.push(creds.accessToken);
+      return {
+        usage: { five_hour: { utilization: 0.1, resets_at: new Date(Date.now() + 5 * 3600 * 1000).toISOString() } },
+        credentials: creds,
+      };
+    },
+    pingFn: async () => ({ success: false }),
+  });
+
+  // A 应该被跳过（7D 满），只有 B 被反复查询
+  assert.ok(polled.every((t) => t === 'b1'), `应该只查询 B，实际：${polled.join(',')}`);
+  assert.ok(polled.length >= 2, '至少查询 B 两次');
 });

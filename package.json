@@ -9,7 +9,7 @@
   },
   "main": "./src/cli.js",
   "scripts": {
-    "test": "node --test tests/config.test.js tests/pinger.test.js tests/scheduler.test.js tests/state.test.js tests/keychain.test.js tests/oauth.test.js tests/notifier.test.js tests/use.test.js",
+    "test": "node --test tests/config.test.js tests/pinger.test.js tests/scheduler.test.js tests/state.test.js tests/keychain.test.js tests/oauth.test.js tests/notifier.test.js tests/use.test.js tests/daemon.test.js",
     "test:all": "node --test tests/*.test.js",
     "changelog": "conventional-changelog -p angular -i CHANGELOG.md -s -r 0",
     "prepublishOnly": "npm test",

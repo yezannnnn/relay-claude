@@ -1,25 +1,24 @@
 // src/commands/tui.js
 // 实时多帐号仪表盘 (htop 风格)
 //
-// 设计:
+// 设计 (v0.5):
+//   - daemon 后台 round-robin 轮询每个账户 usage，写入 config.json
+//   - TUI 只读 config.json，0 API 请求 → 无 IP 429 风险
 //   - ↑↓ 移动选中行（反白显示）
 //   - Enter 切换到当前选中帐号 (use)
 //   - p     ping 当前选中帐号
-//   - r     强制刷新所有 usage (API 调用)
+//   - r     立即从 config.json 重新加载（瞬间，无网络）
 //   - q     退出
-//   - 每 10s 自动从本地缓存重绘 (倒计时实时变化)，无 API 调用
-//   - 仅本地变化时光标回顶覆盖，不清屏，无闪烁
+//   - 每 5s 自动从本地缓存重绘 (拿 daemon 最新轮询数据)
 
-import { loadConfig, getAccessToken, setLastUsage, updateConfig } from '../config.js';
+import { loadConfig, getAccessToken } from '../config.js';
 import { daemonStatus } from '../daemon.js';
 import { isKeychainSupported, readKeychainRaw, parseClaudeCredentials } from '../keychain.js';
-import { queryUsage } from '../oauth.js';
-import { health as healthScore } from '../scheduler.js';
+import { health as healthScore, shouldPrePing, needsSwitch, bestSwitchCandidate } from '../scheduler.js';
 import useCommand from './use.js';
 import { runPing } from './ping-cmd.js';
 
-const REFRESH_INTERVAL_MS = 10_000;
-const API_REFRESH_INTERVAL_MS = 300_000; // 5 分钟一次，避免 Anthropic 限流
+const REFRESH_INTERVAL_MS = 5_000; // 5s 重读 config.json，拿 daemon 最新轮询数据
 
 // ANSI 颜色
 const C = {
@@ -46,10 +45,7 @@ export default async function tuiCommand() {
   let cursor = 0;            // 当前选中行索引
   let status = '';           // 底部状态消息（操作反馈）
   let busy = false;
-  let apiRefreshing = false; // 防止 API 刷新并发
-  let lastApiRefresh = null; // 上次 API 刷新时间
   let timer = null;
-  let apiTimer = null;
   let quitting = false;
   let configCache = null;
   let daemonCache = null;
@@ -59,7 +55,6 @@ export default async function tuiCommand() {
     if (quitting) return;
     quitting = true;
     if (timer) clearInterval(timer);
-    if (apiTimer) clearInterval(apiTimer);
     process.stdout.write('\x1b[?25h\n');
     if (process.stdin.isTTY) process.stdin.setRawMode(false);
     process.exit(0);
@@ -86,65 +81,11 @@ export default async function tuiCommand() {
     else if (cursor < 0) cursor = 0;
   }
 
-  async function refreshFromAPI(fromUser = false) {
-    if (apiRefreshing) return;
-    apiRefreshing = true;
-    if (fromUser) busy = true;
-    status = '正在刷新所有帐号 usage...';
-    render();
-    // 关键设计变更（v0.4 修复 race condition）：
-    //   - TUI 只读 usage（queryUsage），不主动 refresh token
-    //   - token 续期统一由 daemon 负责，避免多入口竞争破坏 refresh chain
-    //   - 写 config 走 updateConfig（每次都重新 loadConfig 拿最新版本），
-    //     只 patch last_usage 字段，不动 credentials → 不会覆盖 daemon 的写入
-    const config = await loadConfig();
-    const accountList = config.accounts.filter((a) => a.credentials);
-    const okList = [];
-    const staleList = []; // token 过期，等 daemon 续期
-    const failed = [];
-
-    for (let i = 0; i < accountList.length; i++) {
-      const a = accountList[i];
-      // 账户间隔 800ms，避免 Anthropic IP 限流
-      if (i > 0) await new Promise((r) => setTimeout(r, 800));
-      try {
-        const usage = await queryUsage(a.credentials.accessToken);
-        okList.push({ name: a.name, usage });
-      } catch (err) {
-        const msg = err?.message ?? String(err);
-        // 401 / token expired → 等 daemon 续期，不报错
-        if (/401|expired|invalid_token/i.test(msg)) {
-          staleList.push(a.name);
-        } else {
-          failed.push({ name: a.name, reason: msg });
-        }
-      }
-    }
-
-    // 原子写入 — 只 patch last_usage，不动 credentials
-    if (okList.length > 0) {
-      await updateConfig((cfg) => {
-        let next = cfg;
-        for (const { name, usage } of okList) {
-          next = setLastUsage(next, name, usage);
-        }
-        return next;
-      });
-    }
-    lastApiRefresh = new Date();
-    const timeStr = lastApiRefresh.toLocaleTimeString('zh-CN', { hour12: false });
-    const parts = [`${okList.length} OK`];
-    if (staleList.length > 0) {
-      parts.push(`${staleList.length} 待续期(${staleList.join(',')})`);
-    }
-    if (failed.length > 0) {
-      const failNames = failed.map((f) => f.name).join(',');
-      parts.push(`${failed.length} 失败(${failNames})`);
-    }
-    status = `已刷新 ${timeStr} — ${parts.join(', ')}`;
-    apiRefreshing = false;
-    if (fromUser) busy = false;
+  async function manualReload() {
+    busy = true;
+    status = '已从缓存重新加载（daemon 后台轮询负责数据更新）';
     await refreshLocal();
+    busy = false;
     render();
   }
 
@@ -222,7 +163,7 @@ export default async function tuiCommand() {
     // Enter
     if (k === '\r' || k === '\n') return actionSwitch();
     if (k === 'p') return actionPing();
-    if (k === 'r') return refreshFromAPI(true);
+    if (k === 'r') return manualReload();
   });
 
   function render() {
@@ -235,12 +176,11 @@ export default async function tuiCommand() {
     const daemon = daemonCache?.running
       ? `${C.green}●${C.reset} 运行中 (uptime ${daemonCache.uptime ?? '-'})`
       : `${C.red}●${C.reset} 未运行`;
-    const refreshTag = apiRefreshing
-      ? `${C.yellow}⟳ 刷新中...${C.reset}`
-      : lastApiRefresh
-        ? `${C.dim}上次刷新: ${lastApiRefresh.toLocaleTimeString('zh-CN', { hour12: false })}${C.reset}`
-        : `${C.dim}自动刷新: 5min${C.reset}`;
-    lines.push(`${C.cyan}${C.bold}▲ relay-claude${C.reset}    ${C.gray}${now}${C.reset}    ${refreshTag}    Daemon: ${daemon}    ${configCache.accounts.length} accounts`);
+    const N = configCache.accounts.length;
+    const pollHint = daemonCache?.running && N > 0
+      ? `${C.dim}usage 每 ${N}min 轮询一次${C.reset}`
+      : `${C.dim}daemon 未运行，数据不刷新${C.reset}`;
+    lines.push(`${C.cyan}${C.bold}▲ relay-claude${C.reset}    ${C.gray}${now}${C.reset}    ${pollHint}    Daemon: ${daemon}    ${N} accounts`);
     lines.push('');
 
     // 计算每个帐号的健康度（缓存到 a._health 供表格使用）
@@ -250,30 +190,19 @@ export default async function tuiCommand() {
     const activeAcc = configCache.accounts.find(
       (a) => activeAccessToken && getAccessToken(a) === activeAccessToken,
     );
-    const candidates = configCache.accounts
-      .filter((a) => a !== activeAcc && a._health > 0)
-      .sort((a, b) => b._health - a._health);
-    const nextCandidate = candidates[0];
-
-    const N = configCache.accounts.length;
     const staggerMin =
       configCache.scheduler?.stagger_min ?? (N > 0 ? Math.round(300 / N) : 0);
 
     // 调度策略面板
+    const nextAction = predictNextAction(configCache.accounts, activeAcc, configCache, nowMs);
+    const prePingPct = Math.round((configCache.scheduler?.preping_usage_threshold ?? 0.5) * 100);
     lines.push(`${C.bold}${C.cyan}┌─ 调度策略 ${'─'.repeat(50)}${C.reset}`);
     lines.push(
       `${C.cyan}│${C.reset} 活跃: ${
         activeAcc ? `${C.bold}${activeAcc.name}${C.reset} (${activeAcc.credentials?.subscriptionType ?? '-'}) ← health ${activeAcc._health}` : '(无)'
       }`,
     );
-    lines.push(
-      `${C.cyan}│${C.reset} 下一切换候选: ${
-        nextCandidate
-          ? `${nextCandidate.name} (${nextCandidate.credentials?.subscriptionType ?? '-'}) ← health ${nextCandidate._health}`
-          : '(无)'
-      }`,
-    );
-    const prePingPct = Math.round((configCache.scheduler?.preping_usage_threshold ?? 0.5) * 100);
+    lines.push(`${C.cyan}│${C.reset} 下一动作: ${C.bold}${nextAction}${C.reset}`);
     lines.push(
       `${C.cyan}│${C.reset} 阈值: 切换=100%   预ping=${prePingPct}% 或 ${staggerMin}min   错峰间隔=${staggerMin}min (300 ÷ ${N})`,
     );
@@ -287,7 +216,7 @@ export default async function tuiCommand() {
       { label: '5H USAGE', width: 32 },
       { label: '7D', width: 6 },
       { label: 'NEXT', width: 10 },
-      { label: 'RESETS', width: 10 },
+      { label: 'RESETS (5H / 7D)', width: 18 },
       { label: 'H分', width: 8 },
       { label: '状态', width: 14 },
     ];
@@ -306,14 +235,9 @@ export default async function tuiCommand() {
       const usageBar = fmtUsageBar(a.last_usage?.five_hour, cols[2].width);
       const sevenD = padRight(fmtUtil(a.last_usage?.seven_day), cols[3].width);
       const next = padRight(fmtNextPing(a, daemonCache, configCache, activeAcc, nowMs), cols[4].width);
-      const sevenDayFull = (a.last_usage?.seven_day?.utilization ?? 0) >= 1.0;
-      const resetsIso = sevenDayFull
-        ? a.last_usage?.seven_day?.resets_at
-        : a.last_usage?.five_hour?.resets_at;
-      const resetsStr = sevenDayFull
-        ? `7D:${fmtTimeUntil(resetsIso)}`
-        : fmtTimeUntil(resetsIso);
-      const resets = padRight(resetsStr, cols[5].width);
+      const fhResets = fmtTimeUntil(a.last_usage?.five_hour?.resets_at);
+      const sdResets = fmtTimeUntil(a.last_usage?.seven_day?.resets_at);
+      const resets = padRight(`${fhResets} / ${sdResets}`, cols[5].width);
       const hScore = padRight(String(a._health ?? 0), cols[6].width);
       const stateLabel = padRight(fmtStateLabel(a, isActive, nowMs), cols[7].width);
 
@@ -356,22 +280,16 @@ export default async function tuiCommand() {
     process.stdout.write(lines.map((l) => l + '\x1b[K').join('\n') + '\x1b[J');
   }
 
-  // 启动：先本地渲染，然后立刻做一次 API 刷新拿最新数据
+  // 启动：先本地渲染
   await refreshLocal();
   render();
-  refreshFromAPI(); // 首次启动不 await，后台刷新
 
+  // 每 5s 重读 config.json — daemon 后台轮询 → config.json → TUI
   timer = setInterval(async () => {
     if (busy) return;
     await refreshLocal();
     render();
   }, REFRESH_INTERVAL_MS);
-
-  // 每 60s 自动刷新所有帐号 usage（不阻塞键盘）
-  apiTimer = setInterval(async () => {
-    if (busy || apiRefreshing || quitting) return;
-    await refreshFromAPI();
-  }, API_REFRESH_INTERVAL_MS);
 
   // 屏幕大小变化时立刻重画
   process.stdout.on('resize', () => {
@@ -492,6 +410,90 @@ function fmtNextPing(account, status, configCache, activeAcc, nowMs) {
 
   const remain = Math.max(0, Math.round(Math.min(timeRemain, usageRemain)));
   return remain === 0 ? 'soon' : `ping@${remain}m`;
+}
+
+/**
+ * 预测 daemon 下一个动作（用于调度面板"下一动作"行）。
+ * 返回类似 "切换 → 备用3 (主力耗尽时立即)" 或 "预 PING → 备用2 (约 15min 后)"。
+ */
+function predictNextAction(accounts, activeAcc, cfg, nowMs) {
+  // 没有活跃账户：daemon 重启或 Keychain 未识别，需要先切换
+  if (!activeAcc) {
+    const candidate = bestSwitchCandidate(accounts, null, cfg, nowMs);
+    if (!candidate) return '无可用账户';
+    return `${C.yellow}切换 → ${candidate.name}${C.reset}（无活跃账户，立即）`;
+  }
+
+  // 活跃账户失效：立即切换
+  if (needsSwitch(activeAcc, cfg, nowMs)) {
+    const candidate = bestSwitchCandidate(accounts, activeAcc, cfg, nowMs);
+    if (!candidate) return `${C.red}所有账户耗尽${C.reset}（等最早重置）`;
+    return `${C.yellow}切换 → ${candidate.name}${C.reset}（活跃失效，立即）`;
+  }
+
+  // 预 PING 检查
+  const next = shouldPrePing(accounts, activeAcc, cfg, nowMs);
+  if (next) {
+    return `${C.cyan}预 PING → ${next.name}${C.reset}（条件已满足，下个调度周期）`;
+  }
+
+  // 计算"还要多久才会预 PING"
+  const N = accounts.length;
+  const stagger = cfg.scheduler?.stagger_min ?? (N > 0 ? 300 / N : 75);
+  const threshold = cfg.scheduler?.preping_usage_threshold ?? 0.5;
+  const activeUsage = activeAcc.last_usage?.five_hour?.utilization ?? 0;
+
+  let windowStartMs;
+  if (activeAcc.window_start) {
+    windowStartMs = activeAcc.window_start;
+  } else if (activeAcc.last_usage?.five_hour?.resets_at) {
+    windowStartMs = new Date(activeAcc.last_usage.five_hour.resets_at).getTime() - 5 * 3600 * 1000;
+  } else {
+    windowStartMs = nowMs;
+  }
+  const elapsedMin = Math.max(0, (nowMs - windowStartMs) / 60_000);
+  const timeRemain = Math.max(0, stagger - elapsedMin);
+
+  // 已有备用在跑 → 链式策略
+  const runningBackups = accounts.filter(
+    (a) =>
+      a !== activeAcc &&
+      a.last_usage?.five_hour?.resets_at &&
+      new Date(a.last_usage.five_hour.resets_at).getTime() > nowMs &&
+      (a.last_usage?.five_hour?.utilization ?? 0) < 1.0,
+  );
+  if (runningBackups.length >= 1) {
+    const next = runningBackups.sort((a, b) => (b._health ?? 0) - (a._health ?? 0))[0];
+    return `${C.dim}等链式接力${C.reset}（${next.name} 已激活，活跃耗尽后切给它）`;
+  }
+
+  // 选下一个待激活目标
+  const dormant = accounts
+    .filter(
+      (a) =>
+        a !== activeAcc &&
+        (a.last_usage?.seven_day?.utilization ?? 0) < 1.0 &&
+        !(
+          a.last_usage?.five_hour?.resets_at &&
+          new Date(a.last_usage.five_hour.resets_at).getTime() > nowMs
+        ),
+    )
+    .sort((a, b) => (b._health ?? 0) - (a._health ?? 0));
+  if (dormant.length === 0) return `${C.dim}无可预 PING 的备用账户${C.reset}`;
+  const target = dormant[0];
+
+  // 用量维度预估
+  let usageRemainMin = Infinity;
+  if (activeUsage > 0 && elapsedMin > 1) {
+    const rate = activeUsage / elapsedMin;
+    usageRemainMin = Math.max(0, (threshold - activeUsage) / rate);
+  }
+  const remain = Math.round(Math.min(timeRemain, usageRemainMin));
+  if (remain <= 0) return `${C.cyan}预 PING → ${target.name}${C.reset}（即将）`;
+  const reason = timeRemain < usageRemainMin
+    ? `${remain}min 后（时间到 stagger）`
+    : `${remain}min 后（用量达 ${Math.round(threshold * 100)}%）`;
+  return `${C.dim}预 PING → ${target.name}${C.reset}（${reason}）`;
 }
 
 function fmtStateLabel(account, isActive, nowMs) {

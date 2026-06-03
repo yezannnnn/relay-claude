@@ -6,6 +6,10 @@
 //   2. 检查目标 token 是否将过期 → 自动刷新
 //   3. 写入目标凭证到 Keychain
 //   4. 调一次 usage API 验证 + 缓存到 last_usage
+//
+// 导出说明:
+//   - useAccount(name, options) — 核心逻辑，出错时抛 Error（可被 daemon 安全调用）
+//   - useCommand(args)          — CLI 入口，包 try/catch + process.exit，默认导出
 
 import {
   isKeychainSupported,
@@ -26,32 +30,34 @@ export function findAccountByAccessToken(config, accessToken) {
   return null;
 }
 
-export default async function useCommand(args) {
+/**
+ * 核心切换逻辑 — 出错时抛 Error，不调 process.exit。
+ * daemon / TUI 内部调用时应用此函数；CLI 入口用 useCommand 包一层。
+ *
+ * @param {string} name  - 目标帐号名
+ * @param {Object} opts
+ * @param {Function} [opts.logFn=console.log]  - 日志输出（成功信息）
+ * @param {Function} [opts.warnFn=console.warn] - 警告输出（非致命问题）
+ * @returns {Promise<{targetCreds: Object, usage: Object|null}>}
+ */
+export async function useAccount(name, { logFn = console.log, warnFn = console.warn } = {}) {
   if (!isKeychainSupported()) {
-    console.error('use: 仅支持 macOS');
-    process.exit(1);
-  }
-
-  const targetName = args[0];
-  if (!targetName) {
-    console.error('用法: interval-claude use <name>');
-    process.exit(1);
+    throw new Error('use: 仅支持 macOS');
   }
 
   const config = await loadConfig();
-  const target = config.accounts.find(a => a.name === targetName);
+  const target = config.accounts.find((a) => a.name === name);
   if (!target) {
-    console.error(`帐号 "${targetName}" 不存在`);
-    process.exit(1);
+    throw new Error(`帐号 "${name}" 不存在`);
   }
   if (!target.credentials) {
-    console.error(`帐号 "${targetName}" 没有 OAuth 凭证（可能是 v0.1 长效 token）`);
-    console.error('请运行: claude /logout && claude /login, 然后 interval-claude add ' + targetName + ' 重新捕获');
-    process.exit(1);
+    throw new Error(
+      `帐号 "${name}" 没有 OAuth 凭证（可能是 v0.1 长效 token）\n` +
+        `请运行: claude /logout && claude /login, 然后 interval-claude add ${name} 重新捕获`,
+    );
   }
 
   // 累积所有 config 修改，最后用 updateConfig 原子写入
-  // 避免和 daemon 续期等并发写入互相覆盖
   const patches = [];
 
   // Step 1: 备份当前 Keychain
@@ -61,32 +67,33 @@ export default async function useCommand(args) {
       const currentParsed = parseClaudeCredentials(currentRaw);
       const owner = findAccountByAccessToken(config, currentParsed.accessToken);
       if (owner) {
-        if (owner.name === targetName) {
-          console.log(`Keychain 已经是 ${targetName} 的凭证`);
+        if (owner.name === name) {
+          logFn(`Keychain 已经是 ${name} 的凭证`);
         } else {
-          console.log(`备份当前 Keychain 到帐号: ${owner.name}`);
+          logFn(`备份当前 Keychain 到帐号: ${owner.name}`);
           patches.push({ type: 'creds', name: owner.name, credentials: currentParsed });
         }
       } else {
-        console.warn('⚠️  当前 Keychain 中的 token 不属于已配置帐号，已忽略备份');
+        warnFn('⚠️  当前 Keychain 中的 token 不属于已配置帐号，已忽略备份');
       }
     } catch (err) {
-      console.warn(`⚠️  解析当前 Keychain 失败: ${err.message}`);
+      warnFn(`⚠️  解析当前 Keychain 失败: ${err.message}`);
     }
   }
 
   // Step 2: 如果目标 token 过期，刷新
   let targetCreds = target.credentials;
   if (isExpiringSoon(targetCreds)) {
-    console.log(`目标 token 即将过期，正在刷新...`);
+    logFn('目标 token 即将过期，正在刷新...');
     try {
       targetCreds = await refreshAccessToken(targetCreds);
-      patches.push({ type: 'creds', name: targetName, credentials: targetCreds });
-      console.log('✅ token 已刷新');
+      patches.push({ type: 'creds', name, credentials: targetCreds });
+      logFn('✅ token 已刷新');
     } catch (err) {
-      console.error(`token 刷新失败: ${err.message}`);
-      console.error(`请运行: claude /logout && claude /login（用 ${targetName} 帐号），然后 interval-claude add ${targetName} 重新捕获`);
-      process.exit(1);
+      throw new Error(
+        `token 刷新失败: ${err.message}\n` +
+          `请运行: claude /logout && claude /login（用 ${name} 帐号），然后 interval-claude add ${name} 重新捕获`,
+      );
     }
   }
 
@@ -98,9 +105,9 @@ export default async function useCommand(args) {
   let usage = null;
   try {
     usage = await queryUsage(targetCreds.accessToken);
-    patches.push({ type: 'usage', name: targetName, usage });
+    patches.push({ type: 'usage', name, usage });
   } catch (err) {
-    console.warn(`⚠️  usage 查询失败: ${err.message}`);
+    warnFn(`⚠️  usage 查询失败: ${err.message}`);
   }
 
   // 原子写入所有累积的 patch
@@ -115,11 +122,30 @@ export default async function useCommand(args) {
     });
   }
 
-  console.log(`✅ 已切换到 ${targetName}`);
-  console.log(`   订阅: ${targetCreds.subscriptionType || '未知'}`);
+  logFn(`✅ 已切换到 ${name}`);
+  logFn(`   订阅: ${targetCreds.subscriptionType || '未知'}`);
   if (usage?.five_hour) {
     const pct = Math.round(usage.five_hour.utilization * 100);
-    console.log(`   5h 使用: ${pct}% (剩余 ${100 - pct}%)`);
+    logFn(`   5h 使用: ${pct}% (剩余 ${100 - pct}%)`);
   }
-  console.log('所有终端的 claude 命令立即生效');
+  logFn('所有终端的 claude 命令立即生效');
+
+  return { targetCreds, usage };
+}
+
+/**
+ * CLI 入口 — 解析 args，出错时打印并 process.exit(1)。
+ */
+export default async function useCommand(args) {
+  const targetName = args[0];
+  if (!targetName) {
+    console.error('用法: interval-claude use <name>');
+    process.exit(1);
+  }
+  try {
+    await useAccount(targetName);
+  } catch (err) {
+    console.error(err.message);
+    process.exit(1);
+  }
 }

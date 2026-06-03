@@ -142,6 +142,10 @@ export async function runDaemon(options = {}) {
   // 测试可注入假 Keychain，避免读真实系统 Keychain 导致测试 hang
   const keychainSupportedFn = options.keychainSupportedFn ?? isKeychainSupported;
   const readKeychainRawFn = options.readKeychainRawFn ?? readKeychainRaw;
+  // 测试可注入假 usage 查询，避免真实 HTTP 调用
+  const queryUsageWithRefreshFn = options.queryUsageWithRefreshFn ?? queryUsageWithRefresh;
+  // 测试可注入假 use 切换，避免真实 Keychain 写入
+  const useAccountFn = options.useAccountFn ?? ((name) => performUseFromDaemon(name));
 
   logFn('daemon: 主循环启动 (v0.3 动态调度)');
 
@@ -157,6 +161,11 @@ export async function runDaemon(options = {}) {
   // 这是兜底保护，防止任何 bug 导致额度被反复 PING 消耗
   const lastPingedAt = new Map();
   const MIN_PING_INTERVAL_MS = 10 * 60 * 1000; // 10 分钟硬隔离
+
+  // v0.5 新增：daemon 后台轮询所有账户 usage（round-robin）。
+  // 每个主循环只查 1 个账户 → N 账户 N 分钟（60s × N）全部刷新一遍。
+  // TUI 完全只读 config.json，不再发 API 请求 → 彻底消除 IP 429。
+  let usagePollCursor = 0;
 
   while (!shouldStop()) {
     let config;
@@ -236,6 +245,37 @@ export async function runDaemon(options = {}) {
       }
     }
 
+    // v0.5: round-robin 轮询一个账户的 usage（每周期只查 1 个，避免 429）
+    // 跳过：无 credentials / 7D 已满（不再变化）
+    const pollable = config.accounts.filter(
+      (a) => a.credentials && (a.last_usage?.seven_day?.utilization ?? 0) < 1.0,
+    );
+    if (pollable.length > 0) {
+      const target = pollable[usagePollCursor % pollable.length];
+      usagePollCursor = (usagePollCursor + 1) % pollable.length;
+      const tsIso = toCST(nowFn());
+      try {
+        const { usage, credentials } = await queryUsageWithRefreshFn(target.credentials);
+        await updateConfig((cfg) => {
+          let next = setLastUsage(cfg, target.name, usage);
+          const existing = next.accounts.find((a) => a.name === target.name);
+          if (existing?.credentials?.accessToken !== credentials.accessToken) {
+            next = setCredentials(next, target.name, credentials);
+          }
+          return next;
+        });
+        const fhPct = usage?.five_hour?.utilization != null
+          ? Math.round(usage.five_hour.utilization * 100) : '?';
+        const sdPct = usage?.seven_day?.utilization != null
+          ? Math.round(usage.seven_day.utilization * 100) : '?';
+        logFn(`[${tsIso}] usage poll ${target.name}: 5H=${fhPct}% 7D=${sdPct}%`);
+      } catch (err) {
+        const msg = err?.message ?? String(err);
+        // 429 / 网络错误：保留旧 usage 数据，下次轮询再试
+        logFn(`[${tsIso}] usage poll ${target.name}: ${msg.slice(0, 100)}`);
+      }
+    }
+
     // 识别当前活跃帐号（通过 Keychain）
     // 如果 Keychain 里的 token 不属于任何已配置帐号，说明用户手动切换到了
     // config 外的帐号（如自己的帐号），此时 pause 调度，避免强行覆盖。
@@ -246,9 +286,31 @@ export async function runDaemon(options = {}) {
         const raw = readKeychainRawFn();
         if (raw) {
           const creds = parseClaudeCredentials(raw);
+          // 先用 accessToken 精确匹配
           active = config.accounts.find(
             (a) => a.credentials?.accessToken === creds.accessToken,
           );
+          // accessToken 不匹配时退回 refreshToken 匹配：
+          // 场景：proactive refresh 更新了 config.json 的 accessToken，
+          // 但 Keychain 同步失败 → Keychain 还是旧 token，
+          // refreshToken 不变可以识别出是同一个 relay 帐号。
+          if (!active && creds.refreshToken) {
+            active = config.accounts.find(
+              (a) => a.credentials?.refreshToken === creds.refreshToken,
+            );
+            if (active) {
+              // Keychain 有过期 accessToken → 立即同步为最新
+              try {
+                const newRaw = serializeCredentials(active.credentials, raw);
+                writeKeychainRaw(newRaw);
+                const ts = toCST(nowFn());
+                logFn(`[${ts}] daemon: Keychain stale for ${active.name}, synced accessToken`);
+              } catch (e) {
+                const ts = toCST(nowFn());
+                logFn(`[${ts}] daemon: Keychain sync failed for ${active.name}: ${e?.message ?? e}`);
+              }
+            }
+          }
           if (!active && creds.accessToken) {
             keychainUnknown = true;
           }
@@ -312,11 +374,18 @@ export async function runDaemon(options = {}) {
       const h = Math.round(health(target, config, nowMs));
 
       if (act.type === ACTION_PING) {
+        // 硬隔离：同一账户 10 分钟内不允许重复 PING
+        const lastPing = lastPingedAt.get(target.name);
+        if (lastPing && nowFn().getTime() - lastPing < MIN_PING_INTERVAL_MS) {
+          logFn(`[${tsIso}] PING ${target.name}: 跳过（距上次 PING 不足 10min）`);
+          continue;
+        }
         logFn(`[${tsIso}] schedule: PING ${target.name} (health=${h})`);
         try {
           const result = await pingFn(target, config.ping_prompt);
           if (result?.success) {
             const pingedAtMs = nowFn().getTime();
+            lastPingedAt.set(target.name, pingedAtMs);
             await recordPing(target.name, new Date(pingedAtMs).toISOString());
             limitReachedAt.delete(target.name);
             logFn(`[${tsIso}] PING ${target.name}: OK`);
@@ -345,7 +414,7 @@ export async function runDaemon(options = {}) {
       } else if (act.type === ACTION_USE) {
         logFn(`[${tsIso}] schedule: USE ${target.name} (health=${h})`);
         try {
-          await performUseFromDaemon(target.name);
+          await useAccountFn(target.name);
           if (config.scheduler?.notify !== false) {
             const fromName = active?.name ?? '上一个帐号';
             const targetUsage = target.last_usage?.five_hour;
@@ -424,11 +493,11 @@ function findEarliestReset(accounts, nowMs) {
   return best;
 }
 
-/** daemon 内调用 use 命令的核心 — 简化版，不退出进程 */
+/** daemon 内切换帐号 — 调 useAccount（抛错）而非 CLI 入口（process.exit） */
 async function performUseFromDaemon(name) {
   // 用 dynamic import 避免循环依赖
   const useModule = await import('./commands/use.js');
-  await useModule.default([name]);
+  await useModule.useAccount(name);
 }
 
 /**
