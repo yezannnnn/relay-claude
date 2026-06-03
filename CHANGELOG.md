@@ -1,3 +1,12 @@
+## [0.5.1](https://github.com/yezannnnn/relay-claude/compare/v0.5.0...v0.5.1) (2026-06-03)
+
+
+### Bug Fixes
+
+* **daemon:** USE 切换通知显示旧缓存额度，改用 useAccount 返回的最新 usage
+* **daemon:** usage API 403 时 resets_at 过期导致切换后立即再切、重复弹通知，新增 lastSwitchedAt 防抖（2 个检查周期内屏蔽 needsSwitch）
+
+
 # [0.5.0](https://github.com/yezannnnn/relay-claude/compare/v0.4.3...v0.5.0) (2026-06-03)
 
 
