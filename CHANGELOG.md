@@ -1,3 +1,27 @@
+# [0.5.0](https://github.com/yezannnnn/relay-claude/compare/v0.4.3...v0.5.0) (2026-06-03)
+
+
+### Features
+
+* **daemon:** 后台 round-robin 轮询所有账户 usage，每轮只查 1 个账户，彻底消除 TUI 引发的 IP 429
+* **tui:** 只读 config.json 展示 usage，r 键从本地重载（无网络请求，瞬间响应）
+* **tui:** 调度策略面板新增"下一动作"预测行，实时显示切换/预 PING 倒计时
+* **tui:** NEXT 列显示每个账户距下次预 ping 的剩余分钟数
+
+
+### Bug Fixes
+
+* **daemon:** ACTION_USE 分支绕过 useAccountFn 注入，导致测试写入真实 Keychain 使用户被登出
+* **keychain:** serializeCredentials 丢失 trustedDeviceToken 字段
+* **use:** 拆分 useAccount（纯逻辑，抛错）与 CLI 入口（process.exit），便于 daemon 内部调用
+
+
+### Tests
+
+* 新增 daemon 主循环完整测试套件（11 个用例），覆盖 round-robin、shouldStop、pingFn 注入、last_pings 持久化
+* 修复 round-robin 测试因 shouldStop 计数器提前耗尽导致只 poll 1 个账户的问题
+
+
 ## [0.4.2](https://github.com/yezannnnn/relay-claude/compare/v0.4.1...v0.4.2) (2026-06-01)
 
 ## [0.4.1](https://github.com/yezannnnn/relay-claude/compare/v0.4.0...v0.4.1) (2026-05-25)
