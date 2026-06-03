@@ -162,6 +162,12 @@ export async function runDaemon(options = {}) {
   const lastPingedAt = new Map();
   const MIN_PING_INTERVAL_MS = 10 * 60 * 1000; // 10 分钟硬隔离
 
+  // 🛡️ USE 防抖：usage API 失败时 last_usage.resets_at 可能过期，
+  // 导致下周期 isWindowExpired → needsSwitch 立即再切，反复发通知。
+  // 记录最近一次 USE 时间，在 2 个检查周期内跳过 needsSwitch 判定。
+  const lastSwitchedAt = new Map();
+  const MIN_SWITCH_INTERVAL_MS = 2 * DEFAULT_CHECK_INTERVAL_MS;
+
   // v0.5 新增：daemon 后台轮询所有账户 usage（round-robin）。
   // 每个主循环只查 1 个账户 → N 账户 N 分钟（60s × N）全部刷新一遍。
   // TUI 完全只读 config.json，不再发 API 请求 → 彻底消除 IP 429。
@@ -329,9 +335,15 @@ export async function runDaemon(options = {}) {
     }
 
     const nowMs = nowFn().getTime();
+    // USE 防抖：刚切换过的账户在 2 个检查周期内临时屏蔽 needsSwitch，
+    // 避免 usage API 失败时 resets_at 过期导致立即再切、重复发通知
+    const recentlySwitched = active && lastSwitchedAt.has(active.name)
+      && (nowMs - lastSwitchedAt.get(active.name)) < MIN_SWITCH_INTERVAL_MS;
     let actions;
     try {
-      actions = schedule(config.accounts, active, config, nowMs);
+      actions = recentlySwitched
+        ? schedule(config.accounts, active, config, nowMs).filter(a => a.type !== ACTION_USE)
+        : schedule(config.accounts, active, config, nowMs);
     } catch (err) {
       logFn(`daemon: schedule() 失败: ${err?.message ?? err}`);
       await interruptibleSleep(checkIntervalMs, shouldStop);
@@ -414,12 +426,13 @@ export async function runDaemon(options = {}) {
       } else if (act.type === ACTION_USE) {
         logFn(`[${tsIso}] schedule: USE ${target.name} (health=${h})`);
         try {
-          await useAccountFn(target.name);
+          const useResult = await useAccountFn(target.name);
+          // 用 useAccount 返回的最新 usage，避免通知显示切换前的旧缓存数据
+          const freshFiveHour = useResult?.usage?.five_hour ?? target.last_usage?.five_hour;
           if (config.scheduler?.notify !== false) {
             const fromName = active?.name ?? '上一个帐号';
-            const targetUsage = target.last_usage?.five_hour;
-            const usagePct = targetUsage?.utilization != null
-              ? `${Math.round(targetUsage.utilization * 100)}%`
+            const usagePct = freshFiveHour?.utilization != null
+              ? `${Math.round(freshFiveHour.utilization * 100)}%`
               : '未知';
             await dispatchNotification({
               title: 'relay-claude · 已切换帐号',
@@ -427,6 +440,9 @@ export async function runDaemon(options = {}) {
               message: `当前编程将使用 ${target.name} 额度（已用 ${usagePct}）`,
             });
           }
+          // 防止 usage API 失败时 last_usage.resets_at 过期导致下周期立即再切
+          // 把切换时间记录下来，让调度器在 checkIntervalMs 内不再判定该账户需要切换
+          lastSwitchedAt.set(target.name, nowFn().getTime());
           allExhaustedNotified = false;
         } catch (err) {
           logFn(`[${tsIso}] USE ${target.name} 失败: ${err?.message ?? err}`);
