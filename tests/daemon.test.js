@@ -434,3 +434,76 @@ test('runDaemon: usage polling 跳过 7D 已满账户', async () => {
   assert.ok(polled.every((t) => t === 'b1'), `应该只查询 B，实际：${polled.join(',')}`);
   assert.ok(polled.length >= 2, '至少查询 B 两次');
 });
+
+// ─── accountUuid 自愈匹配 ────────────────────────────────────────────────
+
+test('runDaemon: token 都对不上时用 account_uuid 匹配，并把新 credentials 写回 config', async () => {
+  const futureExp = Date.now() + 8 * 3600 * 1000;
+  const config = [{
+    name: 'A',
+    account_uuid: 'uuid-A',
+    credentials: { accessToken: 'OLD_AT', refreshToken: 'OLD_RT', expiresAt: futureExp, subscriptionType: 'pro' },
+    offset_minutes: 0,
+  }];
+  await saveTestConfig(config);
+
+  const keychainCreds = { accessToken: 'NEW_AT', refreshToken: 'NEW_RT', expiresAt: futureExp, scopes: [], subscriptionType: 'pro' };
+  let profileCalls = 0;
+
+  const { runDaemon } = await freshModule();
+  let loops = 0;
+  await runDaemon({
+    keychainSupportedFn: () => true,
+    readKeychainRawFn: () => JSON.stringify({ claudeAiOauth: keychainCreds }),
+    queryProfileFn: async (tok) => {
+      profileCalls++;
+      assert.equal(tok, 'NEW_AT');
+      return { email: 'a@x.com', accountUuid: 'uuid-A' };
+    },
+    queryUsageWithRefreshFn: async () => ({ usage: null, credentials: keychainCreds }),
+    useAccountFn: async () => {},
+    pingFn: async () => ({ success: true }),
+    checkIntervalMs: 5,
+    shouldStop: () => ++loops >= 2,
+  });
+
+  // 验证 config 已被 self-heal：accessToken 应该被改成 keychain 当前的 NEW_AT
+  const { loadConfig } = await import('../src/config.js');
+  const cfg = await loadConfig();
+  assert.equal(cfg.accounts[0].credentials.accessToken, 'NEW_AT', 'self-heal 应该把新 token 写回 config');
+  assert.equal(cfg.accounts[0].credentials.refreshToken, 'NEW_RT');
+  // profile 只该被查 1 次（第二次走 cache）
+  assert.equal(profileCalls, 1, `profile 应该只被查 1 次（cache 命中），实际 ${profileCalls} 次`);
+});
+
+test('runDaemon: account_uuid 不匹配任何 config 账户 → keychainUnknown 暂停调度', async () => {
+  const futureExp = Date.now() + 8 * 3600 * 1000;
+  const config = [{
+    name: 'A',
+    account_uuid: 'uuid-A',
+    credentials: { accessToken: 'A_AT', refreshToken: 'A_RT', expiresAt: futureExp, subscriptionType: 'pro' },
+    offset_minutes: 0,
+  }];
+  await saveTestConfig(config);
+
+  const externalCreds = { accessToken: 'EXTERNAL_AT', refreshToken: 'EXTERNAL_RT', expiresAt: futureExp };
+  let pingCount = 0;
+  let profileCalls = 0;
+
+  const { runDaemon } = await freshModule();
+  let loops = 0;
+  await runDaemon({
+    keychainSupportedFn: () => true,
+    readKeychainRawFn: () => JSON.stringify({ claudeAiOauth: externalCreds }),
+    queryProfileFn: async () => { profileCalls++; return { accountUuid: 'uuid-EXTERNAL' }; },
+    useAccountFn: async () => {},
+    pingFn: async () => { pingCount++; return { success: true }; },
+    checkIntervalMs: 5,
+    shouldStop: () => ++loops >= 2,
+  });
+
+  // pingFn 不应被调用（keychainUnknown 暂停）
+  assert.equal(pingCount, 0, 'keychainUnknown 应该暂停调度，pingFn 不该被调用');
+  // profile 只该被查 1 次（第二次因 cache=false 跳过）
+  assert.equal(profileCalls, 1);
+});

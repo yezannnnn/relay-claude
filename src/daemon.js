@@ -21,6 +21,7 @@ import {
   loadConfig,
   saveConfig,
   setCredentials,
+  setAccountUuid,
   setLastUsage,
   updateConfig,
 } from './config.js';
@@ -34,7 +35,7 @@ import {
 import { dueAccounts, schedule, ACTION_PING, ACTION_USE, health } from './scheduler.js';
 import { pingWithRetry } from './pinger.js';
 import { appendLog, toCST } from './logger.js';
-import { queryUsageWithRefresh, refreshAccessToken, isExpiringSoon } from './oauth.js';
+import { queryUsageWithRefresh, refreshAccessToken, isExpiringSoon, queryProfile } from './oauth.js';
 import { dispatchNotification } from './notifier.js';
 import {
   isKeychainSupported,
@@ -146,6 +147,8 @@ export async function runDaemon(options = {}) {
   const queryUsageWithRefreshFn = options.queryUsageWithRefreshFn ?? queryUsageWithRefresh;
   // 测试可注入假 use 切换，避免真实 Keychain 写入
   const useAccountFn = options.useAccountFn ?? ((name) => performUseFromDaemon(name));
+  // 测试可注入假 profile 查询，避免真实 HTTP 调用
+  const queryProfileFn = options.queryProfileFn ?? queryProfile;
 
   logFn('daemon: 主循环启动 (v0.3 动态调度)');
 
@@ -167,6 +170,11 @@ export async function runDaemon(options = {}) {
   // 记录最近一次 USE 时间，在 2 个检查周期内跳过 needsSwitch 判定。
   const lastSwitchedAt = new Map();
   const MIN_SWITCH_INTERVAL_MS = 2 * DEFAULT_CHECK_INTERVAL_MS;
+
+  // 🪪 accountUuid 自愈 cache：accessToken → accountUuid (或 false=查过没匹配)
+  // 用途：access/refresh 都对不上 config 时调 profile API 拿稳定身份 uuid 匹配。
+  // 每次 Keychain 改变会用新 token 查一次，匹配上的写回 config，下次匹配走快路径。
+  const profileUuidCache = new Map();
 
   // v0.5 新增：daemon 后台轮询所有账户 usage（round-robin）。
   // 每个主循环只查 1 个账户 → N 账户 N 分钟（60s × N）全部刷新一遍。
@@ -317,6 +325,49 @@ export async function runDaemon(options = {}) {
               }
             }
           }
+          // 🪪 token 都对不上时的最后兜底：用 profile API 拿 accountUuid 匹配
+          // 场景：用户在 daemon 外手动改过 keychain（如 claude auth login 后又
+          // 改回），token 字符串无法匹配 config，但 account_uuid 是稳定身份。
+          // 匹配成功 → 视为 active，并把新 credentials 写回 config（self-heal）。
+          if (!active && creds.accessToken) {
+            const cached = profileUuidCache.get(creds.accessToken);
+            let uuid = null;
+            if (cached === undefined) {
+              // cache miss → 查 profile API
+              const profile = await queryProfileFn(creds.accessToken).catch(() => null);
+              uuid = profile?.accountUuid ?? null;
+              if (uuid) {
+                profileUuidCache.set(creds.accessToken, uuid);
+              } else if (profile) {
+                // profile 查得到但没 uuid（理论不应发生），缓存空避免反复查
+                profileUuidCache.set(creds.accessToken, false);
+              }
+              // profile 查询失败：不缓存，下次可能能连上
+            } else if (cached !== false) {
+              uuid = cached;
+            }
+
+            if (uuid) {
+              const owner = config.accounts.find((a) => a.account_uuid === uuid);
+              if (owner) {
+                active = owner;
+                // self-heal：keychain 里是新 credentials，写回 config
+                try {
+                  await updateConfig((cfg) => setCredentials(cfg, owner.name, creds));
+                  owner.credentials = creds;
+                  const ts = toCST(nowFn());
+                  logFn(`[${ts}] daemon: self-heal credentials for ${owner.name} via uuid match`);
+                } catch (e) {
+                  const ts = toCST(nowFn());
+                  logFn(`[${ts}] daemon: self-heal updateConfig failed for ${owner.name}: ${e?.message ?? e}`);
+                }
+              } else {
+                // uuid 确实不在 config 里 → 标记 cache 为 false，下次不再查
+                profileUuidCache.set(creds.accessToken, false);
+              }
+            }
+          }
+
           if (!active && creds.accessToken) {
             keychainUnknown = true;
           }

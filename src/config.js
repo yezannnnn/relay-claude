@@ -343,6 +343,25 @@ export function setCredentials(config, name, credentials) {
 }
 
 /**
+ * 纯函数：为指定账户设置稳定身份字段 account_uuid（顶层，不在 credentials 里）。
+ * 账户不存在时抛错。
+ *
+ * 为什么放顶层而不在 credentials：
+ *   Anthropic 用 rotating refresh tokens — credentials 会被 setCredentials
+ *   整体替换。account_uuid 是账户维度的稳定身份，不该跟着 token 一起被覆盖。
+ */
+export function setAccountUuid(config, name, accountUuid) {
+  const account = (config.accounts ?? []).find((a) => a.name === name);
+  if (!account) {
+    throw new Error(`account "${name}" not found`);
+  }
+  if (accountUuid) {
+    account.account_uuid = accountUuid;
+  }
+  return config;
+}
+
+/**
  * 纯函数：为指定账户设置 last_usage 使用情况统计。
  * 账户不存在时抛错。
  *
