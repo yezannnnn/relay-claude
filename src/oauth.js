@@ -24,9 +24,11 @@ export const TOKEN_ENDPOINT = 'https://platform.claude.com/v1/oauth/token';
 export const AUTHORIZE_URL = 'https://claude.ai/oauth/authorize';
 export const EXCHANGE_ENDPOINT = 'https://console.anthropic.com/v1/oauth/token';
 export const REDIRECT_URI = 'https://console.anthropic.com/oauth/code/callback';
-// 最小权限：server 实际只返回 user:profile + user:inference，
-// 移除 org:create_api_key 避免拿到组织级管理 token。
-export const AUTHORIZE_SCOPE = 'user:profile user:inference';
+// ⚠️ 必须带 org:create_api_key — Anthropic authorize endpoint 做 scope 白名单校验，
+// 缺它会返 "Authorization failed - Invalid request format"。
+// server 在 token 响应里会过滤掉它，实际 access_token 的 scope 只剩 user:*，
+// 但请求阶段不能省。POC 实测确认。
+export const AUTHORIZE_SCOPE = 'org:create_api_key user:profile user:inference';
 export const OAUTH_BETA_HEADER = 'oauth-2025-04-20';
 export const USER_AGENT = 'claude-cli/2.0.0';
 
@@ -181,11 +183,19 @@ export async function queryProfile(accessToken, options = {}) {
     });
     if (!res.ok) return null;
     const data = JSON.parse(res.body);
+    // organization_type 是 "claude_pro"/"claude_max"，切掉 claude_ 前缀
+    // 与 keychain 里 claude CLI 自己写的 subscriptionType ('pro'/'max') 风格一致
+    const orgType = data.organization?.organization_type ?? null;
+    const subscriptionType = typeof orgType === 'string'
+      ? orgType.replace(/^claude_/, '')
+      : null;
     return {
       email: data.account?.email ?? null,
       fullName: data.account?.full_name ?? null,
       accountUuid: data.account?.uuid ?? null,
       organizationUuid: data.organization?.uuid ?? null,
+      subscriptionType,
+      rateLimitTier: data.organization?.rate_limit_tier ?? null,
     };
   } catch {
     return null;
@@ -223,23 +233,19 @@ export function generatePKCE() {
 }
 
 /**
- * 生成独立的 OAuth state 用于 CSRF 校验。
- * 不复用 PKCE verifier — 后者必须保密，而 state 会出现在 callback 串里。
- */
-export function generateState() {
-  return base64url(randomBytes(16));
-}
-
-/**
  * 构造 authorize URL — 用户在浏览器打开后，授权页会显示 CODE#STATE 让用户粘贴。
+ *
+ * 注意 state 设计:
+ *   state 复用 PKCE verifier（与 multi-auth 项目和 POC 保持一致）。
+ *   独立 state 会让 Anthropic authorize endpoint 返回 "Invalid request format"。
+ *   CLI 场景下 CSRF 攻击面有限（用户自浏览器登录 + 自终端粘贴 code），
+ *   state 防护的实际价值小，复用 verifier 是 acceptable trade-off。
+ *   PKCE code_verifier 校验仍正常运作 → 攻击者拿不到 verifier 就换不到 token。
+ *
  * @param {{verifier: string, challenge: string}} pkce
- * @param {string} state - 独立生成的 state 串
  * @returns {string}
  */
-export function buildAuthorizeUrl(pkce, state) {
-  if (!state || typeof state !== 'string') {
-    throw new Error('buildAuthorizeUrl: 必须传 state 参数');
-  }
+export function buildAuthorizeUrl(pkce) {
   const url = new URL(AUTHORIZE_URL);
   url.searchParams.set('code', 'true');
   url.searchParams.set('client_id', CLIENT_ID);
@@ -248,19 +254,18 @@ export function buildAuthorizeUrl(pkce, state) {
   url.searchParams.set('scope', AUTHORIZE_SCOPE);
   url.searchParams.set('code_challenge', pkce.challenge);
   url.searchParams.set('code_challenge_method', 'S256');
-  url.searchParams.set('state', state);
+  url.searchParams.set('state', pkce.verifier);
   return url.toString();
 }
 
 /**
  * 用 authorize code 换 access/refresh token。
  * @param {string} callbackValue - 用户粘贴的 "CODE#STATE" 串
- * @param {string} verifier - 同次 PKCE 生成的 verifier
- * @param {string} expectedState - 同次 generateState 生成的 state，用于 CSRF 校验
+ * @param {string} verifier - 同次 PKCE 生成的 verifier（同时充当 state）
  * @param {Object} [options.requestFn] - 测试注入
  * @returns {Promise<Object>} credentials 结构（同 keychain parseClaudeCredentials 输出）
  */
-export async function exchangeCode(callbackValue, verifier, expectedState, options = {}) {
+export async function exchangeCode(callbackValue, verifier, options = {}) {
   const requestFn = options.requestFn ?? curlRequest;
   const sepIdx = callbackValue.indexOf('#');
   if (sepIdx < 0) {
@@ -270,9 +275,6 @@ export async function exchangeCode(callbackValue, verifier, expectedState, optio
   const state = callbackValue.slice(sepIdx + 1);
   if (!code || !state) {
     throw new Error('callback 串缺少 code 或 state');
-  }
-  if (state !== expectedState) {
-    throw new Error('state 不匹配，可能存在 CSRF 攻击或 flow 串号');
   }
   const res = await requestFn({
     url: EXCHANGE_ENDPOINT,

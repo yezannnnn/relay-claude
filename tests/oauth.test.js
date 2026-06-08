@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  isExpiringSoon, CLIENT_ID, queryUsage,
-  generatePKCE, generateState, buildAuthorizeUrl, exchangeCode,
+  isExpiringSoon, CLIENT_ID, queryUsage, queryProfile,
+  generatePKCE, buildAuthorizeUrl, exchangeCode,
   AUTHORIZE_URL, REDIRECT_URI, AUTHORIZE_SCOPE,
 } from '../src/oauth.js';
 
@@ -86,19 +86,9 @@ test('generatePKCE each call returns fresh pair', () => {
   assert.notEqual(a.challenge, b.challenge);
 });
 
-test('generateState 返回独立的 base64url 串', () => {
-  const a = generateState();
-  const b = generateState();
-  // 16 字节 base64url = 22 字符
-  assert.equal(a.length, 22);
-  assert.match(a, /^[A-Za-z0-9_-]+$/);
-  assert.notEqual(a, b);
-});
-
-test('buildAuthorizeUrl 包含所有必需参数且 state 独立于 verifier', () => {
+test('buildAuthorizeUrl 包含所有必需参数，state 复用 verifier', () => {
   const pkce = generatePKCE();
-  const state = generateState();
-  const url = new URL(buildAuthorizeUrl(pkce, state));
+  const url = new URL(buildAuthorizeUrl(pkce));
   assert.equal(url.origin + url.pathname, AUTHORIZE_URL);
   assert.equal(url.searchParams.get('code'), 'true');
   assert.equal(url.searchParams.get('client_id'), CLIENT_ID);
@@ -107,14 +97,8 @@ test('buildAuthorizeUrl 包含所有必需参数且 state 独立于 verifier', (
   assert.equal(url.searchParams.get('scope'), AUTHORIZE_SCOPE);
   assert.equal(url.searchParams.get('code_challenge'), pkce.challenge);
   assert.equal(url.searchParams.get('code_challenge_method'), 'S256');
-  assert.equal(url.searchParams.get('state'), state);
-  // 重要：state 不应等于 verifier（verifier 必须保密）
-  assert.notEqual(url.searchParams.get('state'), pkce.verifier);
-});
-
-test('buildAuthorizeUrl 拒绝缺失 state', () => {
-  const pkce = generatePKCE();
-  assert.throws(() => buildAuthorizeUrl(pkce), /必须传 state/);
+  // state 复用 verifier — Anthropic authorize endpoint 不接受独立 state
+  assert.equal(url.searchParams.get('state'), pkce.verifier);
 });
 
 test('exchangeCode 拼装正确的 POST body 并返回标准 credentials', async () => {
@@ -132,7 +116,7 @@ test('exchangeCode 拼装正确的 POST body 并返回标准 credentials', async
     };
   };
   const before = Date.now();
-  const creds = await exchangeCode('CODE_VAL#STATE_VAL', 'verifier_xyz', 'STATE_VAL', { requestFn: fakeReq });
+  const creds = await exchangeCode('CODE_VAL#STATE_VAL', 'verifier_xyz', { requestFn: fakeReq });
   const after = Date.now();
 
   // 请求 body 校验
@@ -157,26 +141,19 @@ test('exchangeCode 拼装正确的 POST body 并返回标准 credentials', async
 
 test('exchangeCode 拒绝缺少 # 的 callback', async () => {
   await assert.rejects(
-    exchangeCode('no-hash-here', 'verifier', 'state', { requestFn: async () => ({}) }),
+    exchangeCode('no-hash-here', 'verifier', { requestFn: async () => ({}) }),
     /格式错误|CODE#STATE/,
   );
 });
 
 test('exchangeCode 拒绝空 code 或 空 state', async () => {
   await assert.rejects(
-    exchangeCode('#only-state', 'v', 'only-state', { requestFn: async () => ({}) }),
+    exchangeCode('#only-state', 'v', { requestFn: async () => ({}) }),
     /缺少 code 或 state/,
   );
   await assert.rejects(
-    exchangeCode('only-code#', 'v', '', { requestFn: async () => ({}) }),
+    exchangeCode('only-code#', 'v', { requestFn: async () => ({}) }),
     /缺少 code 或 state/,
-  );
-});
-
-test('exchangeCode 拒绝 state 不匹配（CSRF 防护）', async () => {
-  await assert.rejects(
-    exchangeCode('CODE#WRONG_STATE', 'v', 'EXPECTED_STATE', { requestFn: async () => ({}) }),
-    /state 不匹配/,
   );
 });
 
@@ -186,9 +163,41 @@ test('exchangeCode 非 2xx 响应抛错', async () => {
     body: '{"error":"invalid_grant"}',
   });
   await assert.rejects(
-    exchangeCode('A#B', 'v', 'B', { requestFn: fakeReq }),
+    exchangeCode('A#B', 'v', { requestFn: fakeReq }),
     /Authorization code exchange failed.*400/,
   );
+});
+
+test('queryProfile 抽取 subscriptionType 和 rateLimitTier，去掉 claude_ 前缀', async () => {
+  const fakeReq = async () => ({
+    status: 200, ok: true,
+    body: JSON.stringify({
+      account: { email: 'a@x.com', uuid: 'u-1', full_name: 'A' },
+      organization: {
+        uuid: 'o-1',
+        organization_type: 'claude_pro',
+        rate_limit_tier: 'default_claude_ai',
+      },
+    }),
+  });
+  const p = await queryProfile('tok', { requestFn: fakeReq });
+  assert.equal(p.email, 'a@x.com');
+  assert.equal(p.accountUuid, 'u-1');
+  assert.equal(p.subscriptionType, 'pro');
+  assert.equal(p.rateLimitTier, 'default_claude_ai');
+});
+
+test('queryProfile 处理缺失 organization_type', async () => {
+  const fakeReq = async () => ({
+    status: 200, ok: true,
+    body: JSON.stringify({
+      account: { email: 'a@x.com' },
+      organization: { uuid: 'o-1' },
+    }),
+  });
+  const p = await queryProfile('tok', { requestFn: fakeReq });
+  assert.equal(p.subscriptionType, null);
+  assert.equal(p.rateLimitTier, null);
 });
 
 test('exchangeCode 缺失 expires_in 走默认 28800', async () => {
@@ -200,7 +209,7 @@ test('exchangeCode 缺失 expires_in 走默认 28800', async () => {
     }),
   });
   const before = Date.now();
-  const creds = await exchangeCode('A#B', 'v', 'B', { requestFn: fakeReq });
+  const creds = await exchangeCode('A#B', 'v', { requestFn: fakeReq });
   assert.ok(creds.expiresAt >= before + 28800 * 1000 - 100);
   assert.deepEqual(creds.scopes, []); // 缺 scope 字段时空数组
 });

@@ -7,7 +7,7 @@
 
 import { loadConfig, addAccount, setLastUsage, setCredentials, setAccountUuid, updateConfig } from '../config.js';
 import { isKeychainSupported } from '../keychain.js';
-import { queryUsage, queryProfile, generatePKCE, generateState, buildAuthorizeUrl, exchangeCode } from '../oauth.js';
+import { queryUsage, queryProfile, generatePKCE, buildAuthorizeUrl, exchangeCode } from '../oauth.js';
 import { prompt as ask, closePrompt as close } from './prompt.js';
 
 export default async function addCommand(args) {
@@ -47,9 +47,9 @@ async function captureOne(name, { offsetMinutes }) {
   }
 
   // OAuth Authorization Code + PKCE flow — 拿独立 session，不挤压其他账户
+  // state 复用 verifier（详见 src/oauth.js buildAuthorizeUrl 注释）
   const pkce = generatePKCE();
-  const state = generateState();
-  const authUrl = buildAuthorizeUrl(pkce, state);
+  const authUrl = buildAuthorizeUrl(pkce);
   console.log('\n👉 请在浏览器打开下面 URL（推荐隐身窗口）:\n');
   console.log(`   ${authUrl}\n`);
   console.log(`登录目标帐号 "${name}"，授权后页面会显示一串 "CODE#STATE"`);
@@ -58,7 +58,7 @@ async function captureOne(name, { offsetMinutes }) {
     throw new Error('未输入 CODE#STATE，已取消');
   }
 
-  const credentials = await exchangeCode(callbackValue, pkce.verifier, state);
+  let credentials = await exchangeCode(callbackValue, pkce.verifier);
 
   // 验证 + 拉一次 usage + 拉邮箱
   let usage = null;
@@ -69,8 +69,15 @@ async function captureOne(name, { offsetMinutes }) {
   }
 
   const profile = await queryProfile(credentials.accessToken);
-  if (profile?.email) {
-    credentials = { ...credentials, email: profile.email };
+  if (profile) {
+    // OAuth flow 拿到的 credentials 里 subscriptionType/rateLimitTier 是 null，
+    // 由 profile API 补齐（与 claude CLI 写 keychain 时的字段一致）
+    credentials = {
+      ...credentials,
+      email: profile.email ?? credentials.email,
+      subscriptionType: profile.subscriptionType ?? credentials.subscriptionType,
+      rateLimitTier: profile.rateLimitTier ?? credentials.rateLimitTier,
+    };
   }
 
   // 在 updateConfig 里 reload + patch，避免和 daemon 续期等并发写入互相覆盖
