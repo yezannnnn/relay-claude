@@ -11,14 +11,19 @@
 //   - q     退出
 //   - 每 5s 自动从本地缓存重绘 (拿 daemon 最新轮询数据)
 
-import { loadConfig, getAccessToken } from '../config.js';
+import { loadConfig, getAccessToken, updateConfig, setUiLang } from '../config.js';
 import { daemonStatus } from '../daemon.js';
 import { isKeychainSupported, readKeychainRaw, parseClaudeCredentials } from '../keychain.js';
 import { health as healthScore, shouldPrePing, needsSwitch, bestSwitchCandidate } from '../scheduler.js';
 import useCommand from './use.js';
 import { runPing } from './ping-cmd.js';
+import { strings } from './tui-i18n.js';
 
 const REFRESH_INTERVAL_MS = 5_000; // 5s 重读 config.json，拿 daemon 最新轮询数据
+
+// 当前 TUI 展示语言对应的文案表。render() 每帧按 config.ui.lang 刷新，
+// 模块级格式化函数（fmtStateLabel / predictNextAction 等）读它。
+let T = strings('zh');
 
 // ANSI 颜色
 const C = {
@@ -83,7 +88,24 @@ export default async function tuiCommand() {
 
   async function manualReload() {
     busy = true;
-    status = '已从缓存重新加载（daemon 后台轮询负责数据更新）';
+    status = T.reloaded;
+    await refreshLocal();
+    busy = false;
+    render();
+  }
+
+  // 切换中英文，并持久化到 config.json（ui.lang）
+  async function toggleLang() {
+    busy = true;
+    const cur = configCache?.ui?.lang === 'en' ? 'en' : 'zh';
+    const nextLang = cur === 'en' ? 'zh' : 'en';
+    try {
+      await updateConfig((cfg) => setUiLang(cfg, nextLang));
+    } catch {
+      // 持久化失败也不影响本次切换：refreshLocal 后内存里仍是旧值，
+      // 兜底直接改缓存，保证界面立即切过去
+      if (configCache) configCache.ui = { ...(configCache.ui ?? {}), lang: nextLang };
+    }
     await refreshLocal();
     busy = false;
     render();
@@ -93,13 +115,13 @@ export default async function tuiCommand() {
     if (!configCache || !configCache.accounts[cursor]) return;
     const target = configCache.accounts[cursor];
     busy = true;
-    status = `正在切换到 ${target.name}...`;
+    status = T.switching(target.name);
     render();
     try {
       await useCommand([target.name]);
-      status = `已切换到 ${target.name}`;
+      status = T.switched(target.name);
     } catch (err) {
-      status = `切换失败: ${err?.message ?? err}`;
+      status = T.switchFail(err?.message ?? err);
     }
     busy = false;
     await refreshLocal();
@@ -110,14 +132,14 @@ export default async function tuiCommand() {
     if (!configCache || !configCache.accounts[cursor]) return;
     const target = configCache.accounts[cursor];
     busy = true;
-    status = `正在 ping ${target.name}...`;
+    status = T.pinging(target.name);
     render();
     try {
       const result = await runPing(target.name);
       if (result.error) {
-        status = `❌ ping ${target.name}: ${result.error}`;
+        status = T.pingErr(target.name, result.error);
       } else if (result.success) {
-        status = `✅ ping ${target.name} OK (${result.elapsed}ms)`;
+        status = T.pingOk(target.name, result.elapsed);
       } else {
         // ping 失败但不杀 TUI，只显示原因
         let reason = `code=${result.code}`;
@@ -129,10 +151,10 @@ export default async function tuiCommand() {
           const head = result.stdout.trim().split('\n')[0].slice(0, 80);
           reason = head || reason;
         }
-        status = `❌ ping ${target.name} 失败 (${result.elapsed}ms): ${reason}`;
+        status = T.pingFail(target.name, result.elapsed, reason);
       }
     } catch (err) {
-      status = `❌ ping 异常: ${err?.message ?? err}`;
+      status = T.pingExc(err?.message ?? err);
     }
     busy = false;
     await refreshLocal();
@@ -164,23 +186,26 @@ export default async function tuiCommand() {
     if (k === '\r' || k === '\n') return actionSwitch();
     if (k === 'p') return actionPing();
     if (k === 'r') return manualReload();
+    if (k === 'l') return toggleLang();
   });
 
   function render() {
     if (!configCache) return;
+    // 每帧按 config.ui.lang 选用文案表（模块级，供格式化函数读取）
+    T = strings(configCache.ui?.lang);
     const lines = [];
 
     // 标题行
     const now = new Date().toLocaleTimeString('zh-CN', { hour12: false });
     const nowMs = Date.now();
     const daemon = daemonCache?.running
-      ? `${C.green}●${C.reset} 运行中 (uptime ${daemonCache.uptime ?? '-'})`
-      : `${C.red}●${C.reset} 未运行`;
+      ? `${C.green}●${C.reset} ${T.running} (uptime ${daemonCache.uptime ?? '-'})`
+      : `${C.red}●${C.reset} ${T.stopped}`;
     const N = configCache.accounts.length;
     const pollHint = daemonCache?.running && N > 0
-      ? `${C.dim}usage 每 ${N}min 轮询一次${C.reset}`
-      : `${C.dim}daemon 未运行，数据不刷新${C.reset}`;
-    lines.push(`${C.cyan}${C.bold}▲ relay-claude${C.reset}    ${C.gray}${now}${C.reset}    ${pollHint}    Daemon: ${daemon}    ${N} accounts`);
+      ? `${C.dim}${T.pollHint(N)}${C.reset}`
+      : `${C.dim}${T.pollHintOff}${C.reset}`;
+    lines.push(`${C.cyan}${C.bold}▲ relay-claude${C.reset}    ${C.gray}${now}${C.reset}    ${pollHint}    Daemon: ${daemon}    ${N} ${T.accountsSuffix}`);
     lines.push('');
 
     // 计算每个帐号的健康度（缓存到 a._health 供表格使用）
@@ -196,15 +221,15 @@ export default async function tuiCommand() {
     // 调度策略面板
     const nextAction = predictNextAction(configCache.accounts, activeAcc, configCache, nowMs);
     const prePingPct = Math.round((configCache.scheduler?.preping_usage_threshold ?? 0.5) * 100);
-    lines.push(`${C.bold}${C.cyan}┌─ 调度策略 ${'─'.repeat(50)}${C.reset}`);
+    lines.push(`${C.bold}${C.cyan}┌─ ${T.schedTitle} ${'─'.repeat(50)}${C.reset}`);
     lines.push(
-      `${C.cyan}│${C.reset} 活跃: ${
-        activeAcc ? `${C.bold}${activeAcc.name}${C.reset} (${activeAcc.credentials?.subscriptionType ?? '-'}) ← health ${activeAcc._health}` : '(无)'
+      `${C.cyan}│${C.reset} ${T.panelActive}: ${
+        activeAcc ? `${C.bold}${activeAcc.name}${C.reset} (${activeAcc.credentials?.subscriptionType ?? '-'}) ← health ${activeAcc._health}` : T.none
       }`,
     );
-    lines.push(`${C.cyan}│${C.reset} 下一动作: ${C.bold}${nextAction}${C.reset}`);
+    lines.push(`${C.cyan}│${C.reset} ${T.nextActionLabel}: ${C.bold}${nextAction}${C.reset}`);
     lines.push(
-      `${C.cyan}│${C.reset} 阈值: 切换=100%   预ping=${prePingPct}% 或 ${staggerMin}min   错峰间隔=${staggerMin}min (300 ÷ ${N})`,
+      `${C.cyan}│${C.reset} ${T.thresholdLine(prePingPct, staggerMin, N)}`,
     );
     lines.push(`${C.cyan}└${'─'.repeat(60)}${C.reset}`);
     lines.push('');
@@ -217,15 +242,15 @@ export default async function tuiCommand() {
       { label: '7D', width: 6 },
       { label: 'NEXT', width: 10 },
       { label: 'RESETS (5H / 7D)', width: 18 },
-      { label: 'H分', width: 8 },
-      { label: '状态', width: 14 },
+      { label: T.colHp, width: 8 },
+      { label: T.colState, width: 14 },
     ];
     const header = '  ' + cols.map(c => padRight(c.label, c.width)).join(' ');
     lines.push(`${C.bold}${C.dim}${header}${C.reset}`);
 
     // 数据行
     if (configCache.accounts.length === 0) {
-      lines.push(`${C.dim}  (无帐号，运行 interval-claude add <name> 添加)${C.reset}`);
+      lines.push(`${C.dim}  ${T.noAccounts}${C.reset}`);
     }
     // usage 数据新鲜度阈值：超过 ~3 个轮询周期没更新就算陈旧（地板 6min）。
     // daemon round-robin 每 N 分钟刷一遍，正常情况 fetched_at 不会太旧。
@@ -274,14 +299,8 @@ export default async function tuiCommand() {
     }
     lines.push('');
 
-    // 操作提示
-    const helpItems = [
-      `${C.bold}↑↓${C.reset} 选择`,
-      `${C.bold}Enter${C.reset} 切换`,
-      `${C.bold}p${C.reset} ping`,
-      `${C.bold}r${C.reset} 立即刷新`,
-      `${C.bold}q${C.reset} 退出`,
-    ];
+    // 操作提示（含 l 语言切换，标签为「将切换到的目标语言」）
+    const helpItems = T.help.map(([key, label]) => `${C.bold}${key}${C.reset} ${label}`);
     lines.push(`${C.dim}  ${helpItems.join('   ')}${C.reset}`);
 
     // 输出：光标回顶覆盖 + 每行末尾 \x1b[K 清到行尾 + 屏幕末尾 \x1b[J 清残留
@@ -331,7 +350,7 @@ function fmtUsageBar(u, width = 32, opts = {}) {
   // 限流 / 数据陈旧：整条变暗 + 标记，提示这个百分比不是实时真值
   const { rateLimited, stale } = opts;
   if (rateLimited || stale) {
-    const marker = rateLimited ? `${C.yellow}⚠限${C.reset}` : `${C.dim}?旧${C.reset}`;
+    const marker = rateLimited ? `${C.yellow}${T.barRateLimited}${C.reset}` : `${C.dim}${T.barStale}${C.reset}`;
     const bar = C.dim + '█'.repeat(filled) + '░'.repeat(empty) + C.reset;
     const text = `${bar} ${C.dim}${pctStr}${C.reset} ${marker}`;
     // visible = barWidth + 1 + 4 + 1(空格) + 3(标记) = 29
@@ -441,21 +460,21 @@ function predictNextAction(accounts, activeAcc, cfg, nowMs) {
   // 没有活跃账户：daemon 重启或 Keychain 未识别，需要先切换
   if (!activeAcc) {
     const candidate = bestSwitchCandidate(accounts, null, cfg, nowMs);
-    if (!candidate) return '无可用账户';
-    return `${C.yellow}切换 → ${candidate.name}${C.reset}（无活跃账户，立即）`;
+    if (!candidate) return T.saNoAccount;
+    return `${C.yellow}${T.saSwitch} → ${candidate.name}${C.reset}${T.saReasonNoActive}`;
   }
 
   // 活跃账户失效：立即切换
   if (needsSwitch(activeAcc, cfg, nowMs)) {
     const candidate = bestSwitchCandidate(accounts, activeAcc, cfg, nowMs);
-    if (!candidate) return `${C.red}所有账户耗尽${C.reset}（等最早重置）`;
-    return `${C.yellow}切换 → ${candidate.name}${C.reset}（活跃失效，立即）`;
+    if (!candidate) return `${C.red}${T.saAllExhausted}${C.reset}${T.saReasonWaitReset}`;
+    return `${C.yellow}${T.saSwitch} → ${candidate.name}${C.reset}${T.saReasonActiveInvalid}`;
   }
 
   // 预 PING 检查
   const next = shouldPrePing(accounts, activeAcc, cfg, nowMs);
   if (next) {
-    return `${C.cyan}预 PING → ${next.name}${C.reset}（条件已满足，下个调度周期）`;
+    return `${C.cyan}${T.saPrePing} → ${next.name}${C.reset}${T.saReasonCondMet}`;
   }
 
   // 计算"还要多久才会预 PING"
@@ -485,7 +504,7 @@ function predictNextAction(accounts, activeAcc, cfg, nowMs) {
   );
   if (runningBackups.length >= 1) {
     const next = runningBackups.sort((a, b) => (b._health ?? 0) - (a._health ?? 0))[0];
-    return `${C.dim}等链式接力${C.reset}（${next.name} 已激活，活跃耗尽后切给它）`;
+    return `${C.dim}${T.saChainRelay}${C.reset}${T.saReasonChain(next.name)}`;
   }
 
   // 选下一个待激活目标
@@ -500,7 +519,7 @@ function predictNextAction(accounts, activeAcc, cfg, nowMs) {
         ),
     )
     .sort((a, b) => (b._health ?? 0) - (a._health ?? 0));
-  if (dormant.length === 0) return `${C.dim}无可预 PING 的备用账户${C.reset}`;
+  if (dormant.length === 0) return `${C.dim}${T.saNoBackup}${C.reset}`;
   const target = dormant[0];
 
   // 用量维度预估
@@ -510,11 +529,11 @@ function predictNextAction(accounts, activeAcc, cfg, nowMs) {
     usageRemainMin = Math.max(0, (threshold - activeUsage) / rate);
   }
   const remain = Math.round(Math.min(timeRemain, usageRemainMin));
-  if (remain <= 0) return `${C.cyan}预 PING → ${target.name}${C.reset}（即将）`;
+  if (remain <= 0) return `${C.cyan}${T.saPrePing} → ${target.name}${C.reset}${T.saReasonImminent}`;
   const reason = timeRemain < usageRemainMin
-    ? `${remain}min 后（时间到 stagger）`
-    : `${remain}min 后（用量达 ${Math.round(threshold * 100)}%）`;
-  return `${C.dim}预 PING → ${target.name}${C.reset}（${reason}）`;
+    ? T.saReasonByTime(remain)
+    : T.saReasonByUsage(remain, Math.round(threshold * 100));
+  return `${C.dim}${T.saPrePing} → ${target.name}${C.reset}${reason}`;
 }
 
 function fmtStateLabel(account, isActive, nowMs, stale = false) {
@@ -524,18 +543,18 @@ function fmtStateLabel(account, isActive, nowMs, stale = false) {
   if (pe?.kind === 'rate_limited') {
     if (pe.until) {
       const remMin = Math.ceil((new Date(pe.until).getTime() - nowMs) / 60000);
-      if (remMin > 0) return `🟠 限流 ${remMin}m`;
+      if (remMin > 0) return `🟠 ${T.stRateLimited} ${remMin}m`;
     }
-    return '🟠 限流';
+    return `🟠 ${T.stRateLimited}`;
   }
-  if (pe) return isActive ? '⚠ 活跃·异常' : '⚠ 异常';
-  if (isActive) return '🟢 活跃';
-  if ((account.last_usage?.seven_day?.utilization ?? 0) >= 1.0) return '🔴 耗尽';
+  if (pe) return isActive ? `⚠ ${T.stActiveError}` : `⚠ ${T.stError}`;
+  if (isActive) return `🟢 ${T.stActive}`;
+  if ((account.last_usage?.seven_day?.utilization ?? 0) >= 1.0) return `🔴 ${T.stExhausted}`;
   const u = account.last_usage?.five_hour;
-  if (u && u.utilization >= 1.0) return '🔴 耗尽';
+  if (u && u.utilization >= 1.0) return `🔴 ${T.stExhausted}`;
   const resetsAtMs = u?.resets_at ? new Date(u.resets_at).getTime() : null;
-  if (resetsAtMs && resetsAtMs > nowMs) return stale ? '🔵 备用·旧' : '🔵 备用';
-  return '⚪ 待激活';
+  if (resetsAtMs && resetsAtMs > nowMs) return stale ? `🔵 ${T.stBackupStale}` : `🔵 ${T.stBackup}`;
+  return `⚪ ${T.stDormant}`;
 }
 
 function fmtTimeUntil(iso) {

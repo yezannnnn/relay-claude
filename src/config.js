@@ -32,11 +32,16 @@ const DEFAULT_SCHEDULER = Object.freeze({
   notify: true,
 });
 
+const DEFAULT_UI = Object.freeze({
+  lang: 'zh', // TUI 展示语言：'zh' | 'en'
+});
+
 const DEFAULT_CONFIG = Object.freeze({
   interval_minutes: 100,
   ping_prompt: 'hi',
   accounts: [],
   scheduler: DEFAULT_SCHEDULER,
+  ui: DEFAULT_UI,
 });
 
 /**
@@ -113,6 +118,7 @@ function defaultConfig() {
     ping_prompt: DEFAULT_CONFIG.ping_prompt,
     accounts: [],
     scheduler: { ...DEFAULT_SCHEDULER, sub_weights: { ...DEFAULT_SCHEDULER.sub_weights } },
+    ui: { ...DEFAULT_UI },
   };
 }
 
@@ -170,6 +176,10 @@ export async function loadConfig() {
     },
   };
 
+  // 合并 ui 配置（顶层未知字段会被这里丢弃，所以必须显式保留）
+  const userUi = parsed.ui && typeof parsed.ui === 'object' ? parsed.ui : {};
+  const mergedUi = { ...DEFAULT_UI, lang: userUi.lang === 'en' ? 'en' : 'zh' };
+
   // 补全缺失字段，保持向前兼容
   return {
     interval_minutes:
@@ -182,6 +192,7 @@ export async function loadConfig() {
         : DEFAULT_CONFIG.ping_prompt,
     accounts: migratedAccounts,
     scheduler: mergedScheduler,
+    ui: mergedUi,
   };
 }
 
@@ -367,6 +378,16 @@ export function setAccountUuid(config, name, accountUuid) {
  *
  * 用途：存储 OAuth provider 返回的速率限制和使用统计数据。
  */
+/**
+ * 纯函数：设置 TUI 展示语言（'zh' | 'en'，非法值归一为 'zh'）。
+ * 顶层 ui 字段，与账户无关，供 TUI 持久化语言选择。
+ */
+export function setUiLang(config, lang) {
+  const next = lang === 'en' ? 'en' : 'zh';
+  config.ui = { ...(config.ui ?? {}), lang: next };
+  return config;
+}
+
 export function setLastUsage(config, name, usage) {
   const account = (config.accounts ?? []).find((a) => a.name === name);
   if (!account) {

@@ -134,10 +134,10 @@ relay-claude    18:42:57    usage 每 4min 轮询一次    Daemon: ● 运行中
   secondary  Pro    ░░░░░░░░░░░░░░░░░░░░  0%   0%  ping@23m —    300   ⚪ 待激活
   tertiary   Pro    ████▌░░░░░░░░░░░░░░  23%   5%  —      2h11m  178   🔵 备用
 
-↑↓ 选择   Enter 切换   p ping   r 立即刷新   q 退出
+↑↓ 选择   Enter 切换   p ping   r 刷新   l English   q 退出
 ```
 
-TUI 是**只读**的：每 5 秒重读本地缓存 `config.json`。用量数据由后台 daemon 刷新——它每 60 秒轮询一个账户（N 个账户 N 分钟跑完一圈）。按 `r` 立即从缓存重载。
+TUI 是**只读**的：每 5 秒重读本地缓存 `config.json`。用量数据由后台 daemon 刷新——它每 60 秒轮询一个账户（N 个账户 N 分钟跑完一圈）。按 `r` 立即从缓存重载。按 `l` 在中文 / English 之间切换界面语言——选择写入 `config.json`（`ui.lang`），重启后仍生效。
 
 **状态列：**
 

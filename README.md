@@ -134,10 +134,10 @@ relay-claude    18:42:57    usage 每 4min 轮询一次    Daemon: ● running (
   secondary     Pro      ░░░░░░░░░░░░░░░░░░░░   0%     0%    ping@23m  —       300   ⚪ 待激活
   tertiary      Pro      ████▌░░░░░░░░░░░░░░░  23%     5%    —        2h11m   178   🔵 备用
 
-↑↓ 选择   Enter 切换   p ping   r 立即刷新   q 退出
+↑↓ 选择   Enter 切换   p ping   r 刷新   l English   q 退出
 ```
 
-The TUI is **read-only**: it re-reads the cached `config.json` every 5 seconds. Usage data is refreshed in the background by the daemon, which polls one account per 60-second cycle (a full sweep of N accounts every N minutes). Press `r` to reload from cache immediately.
+The TUI is **read-only**: it re-reads the cached `config.json` every 5 seconds. Usage data is refreshed in the background by the daemon, which polls one account per 60-second cycle (a full sweep of N accounts every N minutes). Press `r` to reload from cache immediately. Press `l` to toggle the interface between 中文 and English — the choice is saved to `config.json` (`ui.lang`) and persists across restarts.
 
 **Status column (`状态`):**
 

@@ -253,6 +253,30 @@ test('setPollError 账户不存在抛错', async () => {
   assert.throws(() => setPollError({ accounts: [] }, 'nope', {}), /not found/);
 });
 
+test('setUiLang 设置语言，非法值归一为 zh', async () => {
+  const { setUiLang } = await freshModule();
+  let cfg = { accounts: [] };
+  cfg = setUiLang(cfg, 'en');
+  assert.equal(cfg.ui.lang, 'en');
+  cfg = setUiLang(cfg, 'zh');
+  assert.equal(cfg.ui.lang, 'zh');
+  cfg = setUiLang(cfg, 'fr'); // 非法
+  assert.equal(cfg.ui.lang, 'zh');
+});
+
+test('loadConfig 保留 ui.lang（顶层字段不被丢弃），缺省为 zh', async () => {
+  const { saveConfig, loadConfig, setUiLang } = await freshModule();
+  // 缺省
+  await saveConfig({ accounts: [] });
+  let cfg = await loadConfig();
+  assert.equal(cfg.ui.lang, 'zh');
+  // 持久化往返
+  cfg = setUiLang(cfg, 'en');
+  await saveConfig(cfg);
+  const reloaded = await loadConfig();
+  assert.equal(reloaded.ui.lang, 'en');
+});
+
 test('updateConfig: 原子读改写，updater 收到当前最新 config', async () => {
   const { saveConfig, updateConfig, setLastUsage } = await freshModule();
   await saveConfig({
