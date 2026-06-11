@@ -227,19 +227,28 @@ export default async function tuiCommand() {
     if (configCache.accounts.length === 0) {
       lines.push(`${C.dim}  (无帐号，运行 interval-claude add <name> 添加)${C.reset}`);
     }
+    // usage 数据新鲜度阈值：超过 ~3 个轮询周期没更新就算陈旧（地板 6min）。
+    // daemon round-robin 每 N 分钟刷一遍，正常情况 fetched_at 不会太旧。
+    const pollCycleMs = (N || 1) * 60_000;
+    const staleMs = Math.max(3 * pollCycleMs, 6 * 60_000);
+
     configCache.accounts.forEach((a, i) => {
       const isActive = activeAccessToken && getAccessToken(a) === activeAccessToken;
       const marker = isActive ? `${C.cyan}*${C.reset}` : ' ';
       const name = padRight(a.name, cols[0].width);
       const sub = padRight(a.credentials?.subscriptionType ?? (a.legacy_token ? 'v0.1' : '-'), cols[1].width);
-      const usageBar = fmtUsageBar(a.last_usage?.five_hour, cols[2].width);
+      // 限流 / 数据陈旧 → 用量条变暗并打标记，避免把旧百分比当成实时真值
+      const rateLimited = a.last_poll_error?.kind === 'rate_limited';
+      const fa = a.last_usage?.fetched_at;
+      const stale = fa ? (nowMs - new Date(fa).getTime() > staleMs) : false;
+      const usageBar = fmtUsageBar(a.last_usage?.five_hour, cols[2].width, { rateLimited, stale });
       const sevenD = padRight(fmtUtil(a.last_usage?.seven_day), cols[3].width);
       const next = padRight(fmtNextPing(a, daemonCache, configCache, activeAcc, nowMs), cols[4].width);
       const fhResets = fmtTimeUntil(a.last_usage?.five_hour?.resets_at);
       const sdResets = fmtTimeUntil(a.last_usage?.seven_day?.resets_at);
       const resets = padRight(`${fhResets} / ${sdResets}`, cols[5].width);
       const hScore = padRight(String(a._health ?? 0), cols[6].width);
-      const stateLabel = padRight(fmtStateLabel(a, isActive, nowMs), cols[7].width);
+      const stateLabel = padRight(fmtStateLabel(a, isActive, nowMs, stale), cols[7].width);
 
       const row = `${marker} ${name} ${sub} ${usageBar} ${sevenD} ${next} ${resets} ${hScore} ${stateLabel}`;
       if (i === cursor) {
@@ -306,7 +315,7 @@ export default async function tuiCommand() {
  * 进度条 + 百分比 + 颜色（绿/黄/红）
  * width = 总字符宽度
  */
-function fmtUsageBar(u, width = 32) {
+function fmtUsageBar(u, width = 32, opts = {}) {
   if (!u || u.utilization == null) {
     return padRight(`${C.dim}-${C.reset}`, width + visibleAnsiOverhead());
   }
@@ -317,8 +326,20 @@ function fmtUsageBar(u, width = 32) {
   let color = C.green;
   if (u.utilization >= 0.9) color = C.red;
   else if (u.utilization >= 0.7) color = C.yellow;
-  const bar = color + '█'.repeat(filled) + C.dim + '░'.repeat(empty) + C.reset;
   const pctStr = `${pct}%`.padStart(4);
+
+  // 限流 / 数据陈旧：整条变暗 + 标记，提示这个百分比不是实时真值
+  const { rateLimited, stale } = opts;
+  if (rateLimited || stale) {
+    const marker = rateLimited ? `${C.yellow}⚠限${C.reset}` : `${C.dim}?旧${C.reset}`;
+    const bar = C.dim + '█'.repeat(filled) + '░'.repeat(empty) + C.reset;
+    const text = `${bar} ${C.dim}${pctStr}${C.reset} ${marker}`;
+    // visible = barWidth + 1 + 4 + 1(空格) + 3(标记) = 29
+    const visible = barWidth + 1 + 4 + 1 + 3;
+    return text + ' '.repeat(Math.max(0, width - visible));
+  }
+
+  const bar = color + '█'.repeat(filled) + C.dim + '░'.repeat(empty) + C.reset;
   const text = `${bar} ${color}${pctStr}${C.reset}`;
   // visibleWidth = barWidth + 1 + 4 = 25
   const visible = barWidth + 1 + 4;
@@ -496,13 +517,24 @@ function predictNextAction(accounts, activeAcc, cfg, nowMs) {
   return `${C.dim}预 PING → ${target.name}${C.reset}（${reason}）`;
 }
 
-function fmtStateLabel(account, isActive, nowMs) {
+function fmtStateLabel(account, isActive, nowMs, stale = false) {
+  // 限流优先：429 = usage 接口被限流。即使是活跃账户也要标出来（活跃由 * 标记体现），
+  // 否则面板会显示「🟢 活跃」掩盖真实状态。带 retry-after 退避时显示剩余分钟。
+  const pe = account.last_poll_error;
+  if (pe?.kind === 'rate_limited') {
+    if (pe.until) {
+      const remMin = Math.ceil((new Date(pe.until).getTime() - nowMs) / 60000);
+      if (remMin > 0) return `🟠 限流 ${remMin}m`;
+    }
+    return '🟠 限流';
+  }
+  if (pe) return isActive ? '⚠ 活跃·异常' : '⚠ 异常';
   if (isActive) return '🟢 活跃';
   if ((account.last_usage?.seven_day?.utilization ?? 0) >= 1.0) return '🔴 耗尽';
   const u = account.last_usage?.five_hour;
   if (u && u.utilization >= 1.0) return '🔴 耗尽';
   const resetsAtMs = u?.resets_at ? new Date(u.resets_at).getTime() : null;
-  if (resetsAtMs && resetsAtMs > nowMs) return '🔵 备用';
+  if (resetsAtMs && resetsAtMs > nowMs) return stale ? '🔵 备用·旧' : '🔵 备用';
   return '⚪ 待激活';
 }
 

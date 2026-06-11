@@ -65,6 +65,23 @@ test('normalizeUtilization: 0.0 stays 0', async () => {
   assert.equal(usage.five_hour.utilization, 0);
 });
 
+test('queryUsage: 429 时把 httpStatus 和 retryAfterSec 挂到 error 上', async () => {
+  const reqFn = async () => ({
+    status: 429,
+    ok: false,
+    retryAfter: 1334,
+    body: '{"error":{"type":"rate_limit_error","message":"Rate limited. Please try again later."}}',
+  });
+  await assert.rejects(
+    queryUsage('tok', { requestFn: reqFn }),
+    (err) => {
+      assert.equal(err.httpStatus, 429);
+      assert.equal(err.retryAfterSec, 1334);
+      return true;
+    },
+  );
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // OAuth Authorization Code + PKCE flow
 // ─────────────────────────────────────────────────────────────────────────────

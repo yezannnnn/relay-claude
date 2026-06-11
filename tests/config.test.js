@@ -235,6 +235,24 @@ test('setLastUsage stores usage data on account', async () => {
   assert.equal(cfg.accounts[0].last_usage.five_hour.utilization, 0.57);
 });
 
+test('setPollError 记录限流标记，传 null 时清除', async () => {
+  const { setPollError } = await freshModule();
+  let cfg = {
+    interval_minutes: 100,
+    accounts: [{ name: 'a', credentials: { accessToken: 'x' }, offset_minutes: 0 }],
+  };
+  cfg = setPollError(cfg, 'a', { status: 429, kind: 'rate_limited', at: '2026-06-11T07:00:00Z' });
+  assert.equal(cfg.accounts[0].last_poll_error.kind, 'rate_limited');
+  assert.equal(cfg.accounts[0].last_poll_error.status, 429);
+  cfg = setPollError(cfg, 'a', null);
+  assert.equal(cfg.accounts[0].last_poll_error, undefined);
+});
+
+test('setPollError 账户不存在抛错', async () => {
+  const { setPollError } = await freshModule();
+  assert.throws(() => setPollError({ accounts: [] }, 'nope', {}), /not found/);
+});
+
 test('updateConfig: 原子读改写，updater 收到当前最新 config', async () => {
   const { saveConfig, updateConfig, setLastUsage } = await freshModule();
   await saveConfig({

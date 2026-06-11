@@ -375,3 +375,24 @@ export function setLastUsage(config, name, usage) {
   account.last_usage = usage;
   return config;
 }
+
+/**
+ * 纯函数：记录/清除指定账户最近一次 usage 轮询的错误状态。
+ * 账户不存在时抛错。传 error=null 清除标记（轮询恢复正常时调用）。
+ *
+ * 用途：usage 接口返回 429（账户被网关限流，强相关于额度耗尽）等异常时，
+ *   把状态落到 config，让 TUI 能显示「限流/异常」而不是继续展示陈旧的旧百分比。
+ *   error 结构: { status: number|null, kind: 'rate_limited'|'error', at: ISO, message?: string }
+ */
+export function setPollError(config, name, error) {
+  const account = (config.accounts ?? []).find((a) => a.name === name);
+  if (!account) {
+    throw new Error(`account "${name}" not found`);
+  }
+  if (error == null) {
+    delete account.last_poll_error;
+  } else {
+    account.last_poll_error = error;
+  }
+  return config;
+}

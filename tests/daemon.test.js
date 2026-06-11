@@ -394,6 +394,182 @@ test('runDaemon: usage polling round-robin 轮询所有账户', async () => {
   assert.deepEqual(polled, ['a1', 'b1', 'c1', 'd1'], 'round-robin 应该按配置顺序轮询每个账户一次');
 });
 
+test('runDaemon: usage poll 遇到 429 时记录 last_poll_error 限流标记', async () => {
+  // 模拟账户被网关限流：usage 接口持续 429。
+  // 旧用量数据必须保留，但要打上 rate_limited 标记供 TUI 显示。
+  const config = [
+    {
+      name: 'A',
+      credentials: { accessToken: 'a1', refreshToken: 'r1', expiresAt: Date.now() + 86400000, subscriptionType: 'pro' },
+      offset_minutes: 0,
+      last_usage: {
+        five_hour: { utilization: 0.44, resets_at: new Date(Date.now() + 3600000).toISOString() },
+        seven_day: { utilization: 0.15, resets_at: new Date(Date.now() + 7 * 86400000).toISOString() },
+        fetched_at: new Date(Date.now() - 3600000).toISOString(),
+      },
+    },
+  ];
+  await saveTestConfig(config);
+
+  let calls = 0;
+  const { runDaemon } = await freshModule();
+  await runDaemon({
+    keychainSupportedFn: () => false,
+    checkIntervalMs: 5,
+    shouldStop: () => calls >= 1,
+    useAccountFn: async () => {},
+    queryUsageWithRefreshFn: async () => {
+      calls++;
+      throw new Error('Usage query failed (429): {"error":{"type":"rate_limit_error"}}');
+    },
+    pingFn: async () => ({ success: false }),
+  });
+
+  const { loadConfig } = await import('../src/config.js');
+  const after = await loadConfig();
+  const a = after.accounts.find((x) => x.name === 'A');
+  assert.equal(a.last_poll_error?.kind, 'rate_limited', '429 应记录 rate_limited');
+  assert.equal(a.last_poll_error?.status, 429);
+  assert.equal(a.last_usage.five_hour.utilization, 0.44, '旧用量数据应保留');
+});
+
+test('runDaemon: 429 带 retry-after 时写入 until 退避时间', async () => {
+  const config = [
+    {
+      name: 'A',
+      credentials: { accessToken: 'a1', refreshToken: 'r1', expiresAt: Date.now() + 86400000, subscriptionType: 'pro' },
+      offset_minutes: 0,
+      last_usage: {
+        five_hour: { utilization: 0.44, resets_at: new Date(Date.now() + 3600000).toISOString() },
+        seven_day: { utilization: 0.15, resets_at: new Date(Date.now() + 7 * 86400000).toISOString() },
+        fetched_at: new Date().toISOString(),
+      },
+    },
+  ];
+  await saveTestConfig(config);
+
+  let calls = 0;
+  const before = Date.now();
+  const { runDaemon } = await freshModule();
+  await runDaemon({
+    keychainSupportedFn: () => false,
+    checkIntervalMs: 5,
+    shouldStop: () => calls >= 1,
+    useAccountFn: async () => {},
+    queryUsageWithRefreshFn: async () => {
+      calls++;
+      throw Object.assign(new Error('Usage query failed (429)'), { httpStatus: 429, retryAfterSec: 1334 });
+    },
+    pingFn: async () => ({ success: false }),
+  });
+
+  const { loadConfig } = await import('../src/config.js');
+  const a = (await loadConfig()).accounts.find((x) => x.name === 'A');
+  assert.equal(a.last_poll_error.kind, 'rate_limited');
+  assert.equal(a.last_poll_error.retry_after_s, 1334);
+  const untilMs = new Date(a.last_poll_error.until).getTime();
+  assert.ok(
+    untilMs >= before + 1334 * 1000 - 5000 && untilMs <= Date.now() + 1334 * 1000 + 5000,
+    `until 应约为 now+1334s, 实际 ${a.last_poll_error.until}`,
+  );
+});
+
+test('runDaemon: usage poll 跳过仍在 retry-after 退避期的账户', async () => {
+  const future = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+  const config = [
+    {
+      name: 'A',
+      credentials: { accessToken: 'a1', refreshToken: 'r1', expiresAt: Date.now() + 86400000, subscriptionType: 'pro' },
+      offset_minutes: 0,
+      last_poll_error: { status: 429, kind: 'rate_limited', at: new Date().toISOString(), until: future },
+      last_usage: {
+        five_hour: { utilization: 0.44, resets_at: new Date(Date.now() + 3600000).toISOString() },
+        seven_day: { utilization: 0.15, resets_at: new Date(Date.now() + 7 * 86400000).toISOString() },
+        fetched_at: new Date().toISOString(),
+      },
+    },
+    {
+      name: 'B',
+      credentials: { accessToken: 'b1', refreshToken: 'r2', expiresAt: Date.now() + 86400000, subscriptionType: 'pro' },
+      offset_minutes: 0,
+      last_usage: {
+        five_hour: { utilization: 0.1, resets_at: new Date(Date.now() + 3600000).toISOString() },
+        seven_day: { utilization: 0.05, resets_at: new Date(Date.now() + 7 * 86400000).toISOString() },
+        fetched_at: new Date().toISOString(),
+      },
+    },
+  ];
+  await saveTestConfig(config);
+
+  const polled = [];
+  const { runDaemon } = await freshModule();
+  await runDaemon({
+    keychainSupportedFn: () => false,
+    checkIntervalMs: 5,
+    shouldStop: () => polled.length >= 2,
+    useAccountFn: async () => {},
+    queryUsageWithRefreshFn: async (creds) => {
+      polled.push(creds.accessToken);
+      return {
+        usage: {
+          five_hour: { utilization: 0.1, resets_at: new Date(Date.now() + 3600000).toISOString() },
+          seven_day: { utilization: 0.05, resets_at: new Date(Date.now() + 7 * 86400000).toISOString() },
+          fetched_at: new Date().toISOString(),
+        },
+        credentials: creds,
+      };
+    },
+    pingFn: async () => ({ success: false }),
+  });
+
+  assert.ok(!polled.includes('a1'), `A 在退避期，不应被查询，实际: ${polled.join(',')}`);
+  assert.ok(polled.every((t) => t === 'b1'), `应只轮询 B，实际: ${polled.join(',')}`);
+});
+
+test('runDaemon: usage poll 成功后清除 last_poll_error', async () => {
+  // 账户先带着限流标记，下一次轮询成功 → 标记应被清除
+  const config = [
+    {
+      name: 'A',
+      credentials: { accessToken: 'a1', refreshToken: 'r1', expiresAt: Date.now() + 86400000, subscriptionType: 'pro' },
+      offset_minutes: 0,
+      last_poll_error: { status: 429, kind: 'rate_limited', at: new Date().toISOString() },
+      last_usage: {
+        five_hour: { utilization: 0.44, resets_at: new Date(Date.now() + 3600000).toISOString() },
+        seven_day: { utilization: 0.15, resets_at: new Date(Date.now() + 7 * 86400000).toISOString() },
+        fetched_at: new Date(Date.now() - 3600000).toISOString(),
+      },
+    },
+  ];
+  await saveTestConfig(config);
+
+  let calls = 0;
+  const { runDaemon } = await freshModule();
+  await runDaemon({
+    keychainSupportedFn: () => false,
+    checkIntervalMs: 5,
+    shouldStop: () => calls >= 1,
+    useAccountFn: async () => {},
+    queryUsageWithRefreshFn: async (creds) => {
+      calls++;
+      return {
+        usage: {
+          five_hour: { utilization: 0.5, resets_at: new Date(Date.now() + 3600000).toISOString() },
+          seven_day: { utilization: 0.16, resets_at: new Date(Date.now() + 7 * 86400000).toISOString() },
+          fetched_at: new Date().toISOString(),
+        },
+        credentials: creds,
+      };
+    },
+    pingFn: async () => ({ success: false }),
+  });
+
+  const { loadConfig } = await import('../src/config.js');
+  const after = await loadConfig();
+  const a = after.accounts.find((x) => x.name === 'A');
+  assert.equal(a.last_poll_error, undefined, '成功轮询后限流标记应被清除');
+});
+
 test('runDaemon: usage polling 跳过 7D 已满账户', async () => {
   const config = [
     {

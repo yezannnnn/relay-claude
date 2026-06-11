@@ -41,7 +41,13 @@ const DEFAULT_EXPIRY_THRESHOLD_MS = 10 * 60 * 1000;
  */
 function curlRequest(opts) {
   return new Promise((resolve, reject) => {
-    const args = ['-sS', '-w', '\n__HTTP_STATUS__%{http_code}', '-X', opts.method || 'GET'];
+    // -w 末尾追加 retry-after 响应头：%header{} 需 curl ≥ 7.84（macOS 8.x 支持）。
+    // 老 curl 不识别会原样输出占位串 → 下面解析时 parseInt 得 NaN → 安全降级为 null。
+    const args = [
+      '-sS',
+      '-w', '\n__HTTP_STATUS__%{http_code}__RETRY_AFTER__%header{retry-after}',
+      '-X', opts.method || 'GET',
+    ];
     for (const [k, v] of Object.entries(opts.headers || {})) {
       args.push('-H', `${k}: ${v}`);
     }
@@ -67,9 +73,13 @@ function curlRequest(opts) {
         reject(new Error(`curl output missing status marker: ${stdout.slice(0, 200)}`));
         return;
       }
-      const status = parseInt(stdout.slice(idx + marker.length).trim(), 10);
+      const tail = stdout.slice(idx + marker.length); // "<code>__RETRY_AFTER__<value>"
+      const [statusStr, retryStr] = tail.split('__RETRY_AFTER__');
+      const status = parseInt(statusStr.trim(), 10);
+      const retryNum = retryStr ? parseInt(retryStr.trim(), 10) : NaN;
+      const retryAfter = Number.isFinite(retryNum) && retryNum > 0 ? retryNum : null;
       const body = stdout.slice(0, idx);
-      resolve({ status, body, ok: status >= 200 && status < 300 });
+      resolve({ status, body, ok: status >= 200 && status < 300, retryAfter });
     });
   });
 }
@@ -128,7 +138,12 @@ export async function queryUsage(accessToken, options = {}) {
     });
   }
   if (!res.ok) {
-    throw new Error(`Usage query failed (${res.status}): ${res.body.slice(0, 200)}`);
+    // 把 HTTP 状态和 retry-after（秒）挂到 error 上，供 daemon 做退避调度，
+    // 而不是靠正则去解析 message。
+    throw Object.assign(new Error(`Usage query failed (${res.status}): ${res.body.slice(0, 200)}`), {
+      httpStatus: res.status,
+      retryAfterSec: res.retryAfter ?? null,
+    });
   }
   const data = JSON.parse(res.body);
   return {

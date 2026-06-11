@@ -23,6 +23,7 @@ import {
   setCredentials,
   setAccountUuid,
   setLastUsage,
+  setPollError,
   updateConfig,
 } from './config.js';
 import {
@@ -260,9 +261,20 @@ export async function runDaemon(options = {}) {
     }
 
     // v0.5: round-robin 轮询一个账户的 usage（每周期只查 1 个，避免 429）
-    // 跳过：无 credentials / 7D 已满（不再变化）
+    // 跳过：无 credentials / 7D 已满（不再变化）/ 仍在 retry-after 退避期
+    //
+    // retry-after 退避：usage 接口返回 429 时会带 retry-after 头（让你等 N 秒再来）。
+    // 限流器对"冷却期内再请求"会续命 → 必须尊重它，到点之前不要再戳，否则账户被
+    // 自己的轮询永久按在 429 里出不来。
+    const nowPollMs = Date.now();
     const pollable = config.accounts.filter(
-      (a) => a.credentials && (a.last_usage?.seven_day?.utilization ?? 0) < 1.0,
+      (a) =>
+        a.credentials &&
+        (a.last_usage?.seven_day?.utilization ?? 0) < 1.0 &&
+        !(
+          a.last_poll_error?.until &&
+          new Date(a.last_poll_error.until).getTime() > nowPollMs
+        ),
     );
     if (pollable.length > 0) {
       const target = pollable[usagePollCursor % pollable.length];
@@ -276,6 +288,8 @@ export async function runDaemon(options = {}) {
           if (existing?.credentials?.accessToken !== credentials.accessToken) {
             next = setCredentials(next, target.name, credentials);
           }
+          // 轮询恢复正常 → 清除上次的限流/异常标记
+          next = setPollError(next, target.name, null);
           return next;
         });
         const fhPct = usage?.five_hour?.utilization != null
@@ -285,8 +299,30 @@ export async function runDaemon(options = {}) {
         logFn(`[${tsIso}] usage poll ${target.name}: 5H=${fhPct}% 7D=${sdPct}%`);
       } catch (err) {
         const msg = err?.message ?? String(err);
-        // 429 / 网络错误：保留旧 usage 数据，下次轮询再试
-        logFn(`[${tsIso}] usage poll ${target.name}: ${msg.slice(0, 100)}`);
+        // 429 / 网络错误：保留旧 usage 数据，下次轮询再试。
+        // 但要把异常状态落到 config，让 TUI 显示「限流/异常」而非继续展示陈旧百分比。
+        // 429 = 网关限流该 token 的所有请求（含推理），强相关于额度耗尽。
+        const status = err?.httpStatus ?? Number(/\((\d{3})\)/.exec(msg)?.[1]) ?? null;
+        const retryAfterSec = err?.retryAfterSec ?? null;
+        const kind = status === 429 ? 'rate_limited' : 'error';
+        const pollError = {
+          status: Number.isFinite(status) ? status : null,
+          kind,
+          at: new Date().toISOString(),
+          message: msg.slice(0, 120),
+        };
+        // 有 retry-after → 记录退避截止时间，pollable 过滤会跳过它直到到期
+        if (retryAfterSec && retryAfterSec > 0) {
+          pollError.retry_after_s = retryAfterSec;
+          pollError.until = new Date(Date.now() + retryAfterSec * 1000).toISOString();
+        }
+        try {
+          await updateConfig((cfg) => setPollError(cfg, target.name, pollError));
+        } catch (e) {
+          logFn(`[${tsIso}] usage poll ${target.name}: 记录 poll_error 失败 ${e?.message ?? e}`);
+        }
+        const backoffHint = pollError.until ? ` (退避至 ${toCST(new Date(pollError.until))})` : '';
+        logFn(`[${tsIso}] usage poll ${target.name}: ${msg.slice(0, 100)}${backoffHint}`);
       }
     }
 
