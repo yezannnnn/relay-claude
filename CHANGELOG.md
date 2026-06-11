@@ -1,3 +1,18 @@
+## [0.5.2](https://github.com/yezannnnn/relay-claude/compare/v0.5.1...v0.5.2) (2026-06-11)
+
+
+### Bug Fixes
+
+* **daemon:** usage 接口 429 面板冻结，尊重 retry-after 退避 ([d415f91](https://github.com/yezannnnn/relay-claude/commit/d415f91b4b64a73f45a4da7197be1f954bb0513f))
+* **oauth:** 修复 add 流程多个实测 bug ([57df707](https://github.com/yezannnnn/relay-claude/commit/57df7073ff3b922965724de991813a31d351934b))
+
+
+### Features
+
+* **daemon:** account_uuid 自愈匹配避免 token rotation 丢账户 ([14512f8](https://github.com/yezannnnn/relay-claude/commit/14512f8eefab4e8cd01b8f5bfee5235aa539ba2f))
+* **oauth:** 自实现 OAuth Authorization Code + PKCE 流程支持多账户独立 session ([7a131c7](https://github.com/yezannnnn/relay-claude/commit/7a131c7e63acac09bbf2af0af6fa3c11b84c86ee))
+
+
 ## [0.5.1](https://github.com/yezannnnn/relay-claude/compare/v0.5.0...v0.5.1) (2026-06-03)
 
 
