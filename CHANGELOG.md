@@ -1,3 +1,11 @@
+# [0.6.0](https://github.com/yezannnnn/relay-claude/compare/v0.5.2...v0.6.0) (2026-06-11)
+
+
+### Features
+
+* **tui:** 支持中英文界面切换（l 键，持久化到 config.ui.lang） ([f6e2ce2](https://github.com/yezannnnn/relay-claude/commit/f6e2ce20c88b1feaebb614b8d7de760ba22fd22c))
+
+
 ## [0.5.2](https://github.com/yezannnnn/relay-claude/compare/v0.5.1...v0.5.2) (2026-06-11)
 
 
