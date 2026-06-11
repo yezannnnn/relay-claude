@@ -121,7 +121,7 @@ relay-claude tui
 ```
 
 ```
-intervalClaude    18:42:57    上次刷新: 18:42:00    Daemon: ● running (uptime 2h 14m)
+relay-claude    18:42:57    usage 每 4min 轮询一次    Daemon: ● running (uptime 2h 14m)
 
 ┌─ 调度策略 ──────────────────────────────────────────────
 │ 活跃: primary (Max5x) ← health 187
@@ -137,7 +137,19 @@ intervalClaude    18:42:57    上次刷新: 18:42:00    Daemon: ● running (upt
 ↑↓ 选择   Enter 切换   p ping   r 立即刷新   q 退出
 ```
 
-Dashboard auto-refreshes usage from API every **60 seconds**. Press `r` to force an immediate refresh.
+The TUI is **read-only**: it re-reads the cached `config.json` every 5 seconds. Usage data is refreshed in the background by the daemon, which polls one account per 60-second cycle (a full sweep of N accounts every N minutes). Press `r` to reload from cache immediately.
+
+**Status column (`状态`):**
+
+| Icon | Meaning |
+|------|---------|
+| 🟢 | Active — currently in Keychain (active for all terminals) |
+| 🔵 | Backup — window started, ready to take over |
+| ⚪ | Dormant — window not yet opened |
+| 🔴 | Exhausted — 5h or 7d usage ≥ 100% |
+| 🟠 | Rate-limited — the usage endpoint returned HTTP 429; polling is paused for the `retry-after` window and the column shows a countdown (`限流 Nm`) |
+
+The usage bar dims and shows `⚠限` when an account is rate-limited, or `?旧` when the cached number is stale (not refreshed within ~3 poll cycles) — so a frozen percentage never looks like a live one.
 
 ### 5. Manual account switch
 
@@ -156,7 +168,7 @@ relay-claude stop
 
 ---
 
-## Scheduling Strategy (v0.3)
+## Scheduling Strategy
 
 ### Health Score
 
@@ -204,6 +216,7 @@ With 4 accounts, the stagger interval is `300 ÷ 4 = 75 minutes` and the usage t
 - **Unknown Keychain token**: if the Keychain holds a token that doesn't belong to any configured account (e.g. you manually logged into a personal account), the daemon pauses all scheduling and logs the event. It will not overwrite your manual login.
 - **Ping model**: all pings use `--model haiku` (cheapest model) to minimize quota impact.
 - **Token auto-renewal**: tokens expiring in < 30 minutes are renewed proactively to prevent silent expiry.
+- **Usage rate-limit backoff**: when the usage endpoint returns HTTP 429, the daemon reads the `retry-after` header and stops polling that account until it elapses — re-polling during the cooldown would keep the limiter hot and trap the account in a permanent 429. The dashboard shows `🟠 限流 Nm` meanwhile.
 
 ### Notifications
 
