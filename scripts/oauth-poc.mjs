@@ -16,7 +16,8 @@ import { stdin, stdout } from 'node:process';
 const CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
 const AUTHORIZE_URL = 'https://claude.ai/oauth/authorize';
 // 跟 src/oauth.js 保持一致 — fetch 会被 Anthropic 403，必须用 curl
-const TOKEN_ENDPOINT = 'https://console.anthropic.com/v1/oauth/token';
+// token endpoint 在 platform.claude.com，console.anthropic.com 已废弃返 404
+const TOKEN_ENDPOINT = 'https://platform.claude.com/v1/oauth/token';
 const REDIRECT_URI = 'https://console.anthropic.com/oauth/code/callback';
 const SCOPE = 'org:create_api_key user:profile user:inference';
 const USER_AGENT = 'claude-cli/2.0.0';

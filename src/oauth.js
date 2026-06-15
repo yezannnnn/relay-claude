@@ -19,10 +19,13 @@ export const PROFILE_ENDPOINT = 'https://api.anthropic.com/api/oauth/profile';
 // Refresh endpoint 不在 api.anthropic.com，在 platform.claude.com
 // 通过 strings claude CLI 二进制确认: "https://platform.claude.com/v1/oauth/token"
 export const TOKEN_ENDPOINT = 'https://platform.claude.com/v1/oauth/token';
-// Authorize / code-exchange 走 console.anthropic.com（与 redirect_uri 同域）
-// POC 验证可用，与 TOKEN_ENDPOINT 互不影响
+// Authorize 走 claude.ai；code-exchange 与 refresh 共用同一个 OAuth token endpoint。
+// ⚠️ 历史坑：console.anthropic.com/v1/oauth/token 已被 Anthropic 废弃，
+// 现返 404 not_found_error（实测 2026-06-15）。token 操作全部迁到 platform.claude.com。
+// refresh 早在 v0.3(db5fbbc) 就搬走了，exchange 当时漏改，导致 add 流程 404。
+// authorization_code 与 refresh_token 两种 grant 本就同一个 token endpoint（RFC 6749）。
 export const AUTHORIZE_URL = 'https://claude.ai/oauth/authorize';
-export const EXCHANGE_ENDPOINT = 'https://console.anthropic.com/v1/oauth/token';
+export const EXCHANGE_ENDPOINT = 'https://platform.claude.com/v1/oauth/token';
 export const REDIRECT_URI = 'https://console.anthropic.com/oauth/code/callback';
 // ⚠️ 必须带 org:create_api_key — Anthropic authorize endpoint 做 scope 白名单校验，
 // 缺它会返 "Authorization failed - Invalid request format"。
