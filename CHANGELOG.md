@@ -1,10 +1,16 @@
+## [0.6.1](https://github.com/yezannnnn/relay-claude/compare/v0.6.0...v0.6.1) (2026-06-15)
+
+
+### Bug Fixes
+
+* **oauth:** code-exchange endpoint 迁移到 platform.claude.com 修复 add 404 ([2a6b8c0](https://github.com/yezannnnn/relay-claude/commit/2a6b8c0fc6302baa53caf34d8e1fb2e9aebd131c))
+
 # [0.6.0](https://github.com/yezannnnn/relay-claude/compare/v0.5.2...v0.6.0) (2026-06-11)
 
 
 ### Features
 
 * **tui:** 支持中英文界面切换（l 键，持久化到 config.ui.lang） ([f6e2ce2](https://github.com/yezannnnn/relay-claude/commit/f6e2ce20c88b1feaebb614b8d7de760ba22fd22c))
-
 
 ## [0.5.2](https://github.com/yezannnnn/relay-claude/compare/v0.5.1...v0.5.2) (2026-06-11)
 
@@ -20,41 +26,19 @@
 * **daemon:** account_uuid 自愈匹配避免 token rotation 丢账户 ([14512f8](https://github.com/yezannnnn/relay-claude/commit/14512f8eefab4e8cd01b8f5bfee5235aa539ba2f))
 * **oauth:** 自实现 OAuth Authorization Code + PKCE 流程支持多账户独立 session ([7a131c7](https://github.com/yezannnnn/relay-claude/commit/7a131c7e63acac09bbf2af0af6fa3c11b84c86ee))
 
-
 ## [0.5.1](https://github.com/yezannnnn/relay-claude/compare/v0.5.0...v0.5.1) (2026-06-03)
 
 
 ### Bug Fixes
 
-* **daemon:** USE 切换通知显示旧缓存额度，改用 useAccount 返回的最新 usage
-* **daemon:** usage API 403 时 resets_at 过期导致切换后立即再切、重复弹通知，新增 lastSwitchedAt 防抖（2 个检查周期内屏蔽 needsSwitch）
+* 修复 USE 通知额度显示旧缓存 + 防止 usage 403 时重复切换通知 ([7172735](https://github.com/yezannnnn/relay-claude/commit/7172735ef439a784f6bcdd95791a3dc3ea3eec1f))
 
-
-# [0.5.0](https://github.com/yezannnnn/relay-claude/compare/v0.4.3...v0.5.0) (2026-06-03)
-
-
-### Features
-
-* **daemon:** 后台 round-robin 轮询所有账户 usage，每轮只查 1 个账户，彻底消除 TUI 引发的 IP 429
-* **tui:** 只读 config.json 展示 usage，r 键从本地重载（无网络请求，瞬间响应）
-* **tui:** 调度策略面板新增"下一动作"预测行，实时显示切换/预 PING 倒计时
-* **tui:** NEXT 列显示每个账户距下次预 ping 的剩余分钟数
+# [0.5.0](https://github.com/yezannnnn/relay-claude/compare/v0.4.1...v0.5.0) (2026-06-03)
 
 
 ### Bug Fixes
 
-* **daemon:** ACTION_USE 分支绕过 useAccountFn 注入，导致测试写入真实 Keychain 使用户被登出
-* **keychain:** serializeCredentials 丢失 trustedDeviceToken 字段
-* **use:** 拆分 useAccount（纯逻辑，抛错）与 CLI 入口（process.exit），便于 daemon 内部调用
-
-
-### Tests
-
-* 新增 daemon 主循环完整测试套件（11 个用例），覆盖 round-robin、shouldStop、pingFn 注入、last_pings 持久化
-* 修复 round-robin 测试因 shouldStop 计数器提前耗尽导致只 poll 1 个账户的问题
-
-
-## [0.4.2](https://github.com/yezannnnn/relay-claude/compare/v0.4.1...v0.4.2) (2026-06-01)
+* 修复测试 Keychain 污染 + ACTION_USE 绕过 useAccountFn 注入 ([151d685](https://github.com/yezannnnn/relay-claude/commit/151d685f659cde6831729e839dea19e5760d4a1d))
 
 ## [0.4.1](https://github.com/yezannnnn/relay-claude/compare/v0.4.0...v0.4.1) (2026-05-25)
 
